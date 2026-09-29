@@ -1,6 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>d3-force-3d on WebGPU: a 3D graph drawn straight from the simulation's buffers</title>
 <script type="importmap">
 {
@@ -24,27 +25,48 @@
   #hud select, #hud button { font: inherit; background: #1a2030; color: inherit; border: 1px solid #333c52; border-radius: 4px; padding: 2px 6px; }
   #hud button { cursor: pointer; }
   #stats { margin-top: 6px; color: #8f9bb3; font-variant-numeric: tabular-nums; white-space: pre; }
-  #error { position: fixed; inset: 0; display: none; place-items: center; text-align: center; padding: 2rem; }
+  #note { margin-top: 6px; color: #d9a441; display: none; }
+  #error { position: fixed; inset: 0; display: none; place-items: center; text-align: center; padding: 2rem; pointer-events: none; }
+  #error p { max-width: 26rem; margin: 0; padding: 1rem 1.25rem; background: rgba(15, 18, 26, .9); border: 1px solid #6b4a1a; border-radius: 8px; color: #f0c674; }
+  #gpu { display: flex; align-items: center; gap: 7px; margin: 0 0 8px; color: #8f9bb3; }
+  #gpu::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: #6b7488; }
+  #gpu.ok::before { background: #3ecf8e; box-shadow: 0 0 6px #3ecf8e88; }
+  #gpu.bad::before { background: #f0605d; }
+  #mode { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 0 0 6px; }
+  #mode label { display: block; margin: 0; cursor: pointer; }
+  #mode input { position: absolute; opacity: 0; pointer-events: none; }
+  #mode span { display: block; padding: 4px 6px; text-align: center; background: #1a2030; border: 1px solid #333c52; border-radius: 4px; line-height: 1.25; }
+  #mode small { display: block; color: #8f9bb3; font-size: 11px; }
+  #mode input:checked + span { background: #2a4fc4; border-color: #3b6ff0; color: #fff; }
+  #mode input:checked + span small { color: #cfd9ff; }
+  #mode input:focus-visible + span { outline: 2px solid #9fb0cf; }
+  #mode input:disabled + span { opacity: .45; cursor: not-allowed; }
 </style>
 
 <canvas id="canvas"></canvas>
 <div id="hud">
   <h1>d3-force-3d · WebGPU</h1>
+  <div id="gpu">checking WebGPU…</div>
+  <div id="mode" role="radiogroup" aria-label="Physics engine">
+    <label><input type="radio" name="mode" value="cpu" autocomplete="off"><span>CPU<small>d3-force-3d</small></span></label>
+    <label><input type="radio" name="mode" value="gpu" checked autocomplete="off"><span>GPU<small>d3-force-3d-webgpu</small></span></label>
+  </div>
   <label>Nodes
-    <select id="count">
+    <select id="count" autocomplete="off">
       <option>1000</option><option>5000</option><option selected>20000</option>
       <option>50000</option><option>100000</option><option>200000</option>
     </select>
   </label>
-  <label>Charge strength <input id="charge" type="range" min="1" max="200" value="30"></label>
-  <label>Link distance <input id="distance" type="range" min="1" max="100" value="30"></label>
-  <label><span>Simulation <button id="reheat">Reheat</button></span> <span><input id="rotate" type="checkbox" checked> auto-rotate</span></label>
+  <label>Charge strength <input id="charge" autocomplete="off" type="range" min="1" max="200" value="30"></label>
+  <label>Link distance <input id="distance" autocomplete="off" type="range" min="1" max="100" value="30"></label>
+  <label><span>Simulation <button id="reheat">Reheat</button></span> <span><input id="rotate" type="checkbox" checked autocomplete="off"> auto-rotate</span></label>
   <div id="stats"></div>
+  <div id="note"></div>
 </div>
-<div id="error"></div>
+<div id="error"><p></p></div>
 
 <script type="module">
-import {forceSimulationGPU, forceManyBody, forceLink, forceCenter, isWebGPUAvailable} from "../src/index.js";
+import {forceSimulation, forceSimulationGPU, forceManyBody, forceLink, forceCenter} from "../src/index.js";
 
 var $ = function(id) { return document.getElementById(id); },
     params = new URLSearchParams(location.search),
@@ -52,11 +74,36 @@ var $ = function(id) { return document.getElementById(id); },
 
 if (params.get("n")) $("count").value = params.get("n");
 if (params.get("rotate") === "0") $("rotate").checked = false;
+if (params.get("mode") === "cpu" || params.get("mode") === "gpu") document.querySelector("#mode input[value=" + params.get("mode") + "]").checked = true;
+
+// The CPU simulation runs on the main thread: above this it would freeze the page.
+var CPU_MAX = 50000;
+
+function mode() { return document.querySelector("#mode input:checked").value; }
 
 function fail(message) {
   $("error").style.display = "grid";
-  $("error").textContent = message;
-  $("hud").style.display = "none";
+  $("error").firstChild.textContent = message;
+}
+
+// What this browser and machine offer, shown at the top of the panel.
+async function detectWebGPU() {
+  var box = $("gpu");
+  function report(kind, text) { box.className = kind, box.textContent = text; }
+
+  if (!navigator.gpu) {
+    report("bad", window.isSecureContext ? "WebGPU: not supported by this browser" : "WebGPU: needs https or localhost");
+    return null;
+  }
+  try {
+    var adapter = await navigator.gpu.requestAdapter({powerPreference: "high-performance"});
+    if (!adapter) return report("bad", "WebGPU: supported, but no GPU adapter found"), null;
+    var info = adapter.info || {}, name = [info.vendor, info.architecture].filter(Boolean).join(" ") || info.description || "GPU adapter";
+    report("ok", "WebGPU: " + name);
+    return adapter;
+  } catch (error) {
+    return report("bad", "WebGPU: " + (error && error.message || "could not start")), null;
+  }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -175,23 +222,45 @@ function storage(data) {
   return buffer;
 }
 
-async function start() {
-  if (current) current.sim.destroy(), current.buffers.forEach(function(b) { b.destroy(); });
+function teardown() {
+  if (!current) return;
+  current.sim.stop();
+  if (current.sim.destroy) current.sim.destroy(); // the GPU simulation holds GPU resources
+  current.buffers.forEach(function(b) { b.destroy(); });
   current = null;
+}
 
-  var n = +$("count").value, graph = makeGraph(n),
+// Both modes are drawn the same way. On the GPU the renderer reads the simulation's own
+// buffer; on the CPU the node positions are uploaded to a buffer whenever they change.
+async function start() {
+  teardown();
+
+  var n = +$("count").value, graph = makeGraph(n), gpu = mode() === "gpu",
       charge = forceManyBody().strength(-$("charge").value),
       link = forceLink(graph.links).distance(+$("distance").value),
-      sim = forceSimulationGPU(graph.nodes, 3, {device: device, readback: false})
+      sim = (gpu ? forceSimulationGPU(graph.nodes, 3, {device: device, readback: false}) : forceSimulation(graph.nodes, 3))
           .force("link", link).force("charge", charge).force("center", forceCenter()),
-      state = {sim: sim, charge: charge, link: link, graph: graph, ticks: 0, buffers: []};
+      state = {sim: sim, charge: charge, link: link, graph: graph, ticks: 0, buffers: [], wantGPU: gpu,
+               startedAt: performance.now(), settledAt: null, dirty: true, posBuffer: null};
 
   current = state;
-  sim.on("tick", function() { ++state.ticks; });
-  if (!await sim.gpuReady()) return fail("The simulation could not start on the GPU.");
+  sim.on("tick", function() { ++state.ticks, state.dirty = true; });
+  sim.on("end", function() { state.settledAt = performance.now(); });
 
-  var positions = sim.gpuBuffers().positions, linkBuffer = storage(graph.pairs), degreeBuffer = storage(graph.degree);
-  state.buffers = [linkBuffer, degreeBuffer];
+  var positions = null;
+  if (gpu) {
+    await sim.gpuReady();
+    if (current !== state) return; // switched again while waiting
+    if (sim.isGPUEnabled()) positions = sim.gpuBuffers().positions;
+  }
+  if (!positions) { // CPU physics, so upload positions from the nodes
+    positions = state.posBuffer = device.createBuffer({size: 16 * n, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+    state.staging = new Float32Array(4 * n);
+    state.buffers.push(positions);
+  }
+
+  var linkBuffer = storage(graph.pairs), degreeBuffer = storage(graph.degree);
+  state.buffers.push(linkBuffer, degreeBuffer);
   state.nodeGroup = device.createBindGroup({layout: pipelines.node.getBindGroupLayout(0), entries: [
     {binding: 0, resource: {buffer: frameBuffer}}, {binding: 1, resource: {buffer: positions}}, {binding: 3, resource: {buffer: degreeBuffer}}]});
   state.linkGroup = device.createBindGroup({layout: pipelines.link.getBindGroupLayout(0), entries: [
@@ -202,10 +271,23 @@ async function start() {
   fitLoop(state);
 }
 
+function upload(state) {
+  var nodes = state.graph.nodes, a = state.staging;
+  for (var i = 0, n = nodes.length, node; i < n; ++i) node = nodes[i], a[4 * i] = node.x, a[4 * i + 1] = node.y, a[4 * i + 2] = node.z;
+  device.queue.writeBuffer(state.posBuffer, 0, a);
+  state.dirty = false;
+}
+
+// Restart the simulation and its "settled in" clock.
+function reheat(state, alpha) {
+  state.startedAt = performance.now(), state.settledAt = null;
+  state.sim.alpha(alpha).restart();
+}
+
 // Once a second, read the layout back (the one place it is needed on the CPU) to size the view.
 async function fitLoop(state) {
   while (current === state) {
-    await state.sim.sync();
+    if (state.sim.isGPUEnabled && state.sim.isGPUEnabled()) await state.sim.sync();
     var nodes = state.graph.nodes, s = 0;
     for (var i = 0; i < nodes.length; ++i) s += nodes[i].x * nodes[i].x + nodes[i].y * nodes[i].y + nodes[i].z * nodes[i].z;
     if (s > 0) camera.target = 3.2 * Math.sqrt(s / nodes.length) + 40;
@@ -243,6 +325,7 @@ function draw(now) {
   device.queue.writeBuffer(frameBuffer, 0, frame);
 
   if (current && current.nodeGroup) {
+    if (current.posBuffer && current.dirty) upload(current);
     var encoder = device.createCommandEncoder(),
         pass = encoder.beginRenderPass({
           colorAttachments: [{view: context.getCurrentTexture().createView(), clearValue: {r: 0.043, g: 0.051, b: 0.07, a: 1}, loadOp: "clear", storeOp: "store"}],
@@ -260,17 +343,33 @@ function draw(now) {
     if (now - lastStats > 500) {
       tickRate = (current.ticks - lastTicks) * 1000 / (now - lastStats);
       lastTicks = current.ticks, lastStats = now;
+      var onGPU = !!current.sim.isGPUEnabled && current.sim.isGPUEnabled(), settled = current.settledAt !== null;
       $("stats").textContent = current.nodeCount.toLocaleString() + " nodes · " + current.linkCount.toLocaleString() + " links\n"
-          + "render " + fps.toFixed(0) + " fps · physics " + tickRate.toFixed(0) + " ticks/s\n"
-          + "alpha " + current.sim.alpha().toFixed(3) + (current.sim.isGPUEnabled() ? " · on GPU" : " · CPU");
+          + "physics on " + (onGPU ? "GPU" : "CPU") + " · render " + fps.toFixed(0) + " fps\n"
+          + (settled ? "settled in " + ((current.settledAt - current.startedAt) / 1000).toFixed(1) + " s (" + current.ticks + " ticks)"
+                     : tickRate.toFixed(0) + " ticks/s · alpha " + current.sim.alpha().toFixed(3));
+      $("note").style.display = current.wantGPU && !onGPU ? "block" : "none";
+      $("note").textContent = "The GPU simulation could not start, so this ran on the CPU.";
     }
   }
 }
 
+// The CPU simulation can't handle every size. Keep the choices honest.
+function limitCounts() {
+  var cpu = mode() === "cpu";
+  Array.prototype.forEach.call($("count").options, function(option) {
+    option.disabled = cpu && +option.value > CPU_MAX;
+    option.title = option.disabled ? "Too many nodes for the CPU simulation: it would freeze the page" : "";
+  });
+  if ($("count").selectedOptions[0].disabled) $("count").value = "20000";
+}
+
 (async function() {
-  if (!isWebGPUAvailable()) return fail("WebGPU is not available in this browser.");
-  var adapter = await navigator.gpu.requestAdapter({powerPreference: "high-performance"});
-  if (!adapter) return fail("No WebGPU adapter found.");
+  var adapter = await detectWebGPU();
+  if (!adapter) {
+    Array.prototype.forEach.call(document.querySelectorAll("#hud input, #hud select, #hud button"), function(el) { el.disabled = true; });
+    return fail("This demo draws with WebGPU, so it needs it too. Try a recent Chrome or Edge.");
+  }
   device = await adapter.requestDevice();
   format = navigator.gpu.getPreferredCanvasFormat();
   context = canvas.getContext("webgpu");
@@ -288,10 +387,18 @@ function draw(now) {
       primitive: {topology: "line-list"}, depthStencil: depthStencil(false)})
   };
 
+  limitCounts();
+  document.querySelectorAll("#mode input").forEach(function(input) {
+    input.addEventListener("change", function() {
+      limitCounts();
+      history.replaceState(null, "", "?mode=" + mode() + "&n=" + $("count").value);
+      start();
+    });
+  });
   $("count").addEventListener("change", start);
-  $("charge").addEventListener("input", function() { if (current) current.charge.strength(-$("charge").value), current.sim.alpha(Math.max(current.sim.alpha(), 0.3)).restart(); });
-  $("distance").addEventListener("input", function() { if (current) current.link.distance(+$("distance").value), current.sim.alpha(Math.max(current.sim.alpha(), 0.3)).restart(); });
-  $("reheat").addEventListener("click", function() { if (current) current.sim.alpha(1).restart(); });
+  $("charge").addEventListener("input", function() { if (current) current.charge.strength(-$("charge").value), reheat(current, Math.max(current.sim.alpha(), 0.3)); });
+  $("distance").addEventListener("input", function() { if (current) current.link.distance(+$("distance").value), reheat(current, Math.max(current.sim.alpha(), 0.3)); });
+  $("reheat").addEventListener("click", function() { if (current) reheat(current, 1); });
 
   canvas.addEventListener("pointerdown", function(e) { drag = {x: e.clientX, y: e.clientY}; canvas.setPointerCapture(e.pointerId); });
   canvas.addEventListener("pointermove", function(e) {

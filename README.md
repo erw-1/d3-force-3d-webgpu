@@ -95,7 +95,7 @@ The many-body force sums every pair (O(n²)). That's very fast up to ~100k nodes
 
 ## Try it
 
-* **[Live demo](https://erw-1.github.io/d3-force-3d-webgpu/examples/graph3d.html)**. 3D graph, up to 200k nodes, rendered from the simulation's own buffers.
+* **[Live demo](https://erw-1.github.io/d3-force-3d-webgpu/examples/graph3d.html)**. 3D graph, up to 200k nodes, rendered from the simulation's own buffers. Flip between CPU (d3-force-3d) and GPU physics to see the difference. It also tells you which GPU it found.
 * **[Benchmark](https://erw-1.github.io/d3-force-3d-webgpu/examples/benchmark.html)**. CPU vs GPU on your machine.
 * Locally: `npm install`, `npm run examples`, open <http://localhost:8080/examples/graph3d.html>.
 
