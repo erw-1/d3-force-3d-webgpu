@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # yarn.lock is upstream's; the GPU test dependency (webgpu) is not in it
+      - run: npm install --no-package-lock --no-audit --no-fund
+      # GPU tests skip themselves when the runner has no WebGPU adapter
+      - run: npm test
+      - run: npx rollup -c

@@ -1,0 +1,61 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d3-force-3d-webgpu</title>
+<meta name="description" content="d3-force-3d, running on your GPU. Same forces, same API, WebGPU compute shaders.">
+<meta property="og:title" content="d3-force-3d-webgpu">
+<meta property="og:description" content="d3-force-3d, running on your GPU. 20,000 nodes in 3D: 5 ms per tick instead of 214.">
+<meta property="og:image" content="https://raw.githubusercontent.com/erw-1/d3-force-3d-webgpu/master/img/graph3d-webgpu.jpg">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0b0d12; color: #cfd6e4; font: 16px/1.55 system-ui, sans-serif; }
+  main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+  h1 { margin: 0 0 .25rem; font-size: 2rem; color: #fff; letter-spacing: -.01em; }
+  .lead { margin: 0 0 1.75rem; font-size: 1.15rem; color: #9fb0cf; }
+  .hero { display: block; border: 1px solid #262c3a; border-radius: 10px; overflow: hidden; }
+  .hero img { display: block; width: 100%; height: auto; }
+  .buttons { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0 2rem; }
+  a.button { padding: .6rem 1.1rem; border-radius: 8px; border: 1px solid #333c52; color: #fff; text-decoration: none; background: #1a2030; }
+  a.button.primary { background: #3b6ff0; border-color: #3b6ff0; }
+  a.button:hover { filter: brightness(1.15); }
+  code, pre { font: .9rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  pre { margin: 0 0 1.5rem; padding: 1rem; overflow-x: auto; background: #12151d; border: 1px solid #262c3a; border-radius: 8px; }
+  p code { padding: .1rem .35rem; background: #12151d; border-radius: 4px; }
+  #support { display: none; margin: 0 0 1.5rem; padding: .75rem 1rem; border: 1px solid #6b4a1a; background: #2a2010; border-radius: 8px; color: #f0c674; }
+  footer { margin-top: 2.5rem; color: #7d89a3; font-size: .9rem; }
+  footer a { color: #9fb0cf; }
+</style>
+
+<main>
+  <h1>d3-force-3d-webgpu</h1>
+  <p class="lead">d3-force-3d, running on your GPU. Same forces. Same API.</p>
+
+  <p id="support">This browser doesn't have WebGPU, so the demos won't run here. Try a recent Chrome or Edge.</p>
+
+  <a class="hero" href="examples/graph3d.html"><img src="img/graph3d-webgpu.jpg" alt="20,000 nodes in 3D, drawn straight from the simulation's GPU buffers"></a>
+
+  <div class="buttons">
+    <a class="button primary" href="examples/graph3d.html">Live demo</a>
+    <a class="button" href="examples/benchmark.html">Benchmark</a>
+    <a class="button" href="https://github.com/erw-1/d3-force-3d-webgpu#readme">Docs</a>
+    <a class="button" href="https://www.npmjs.com/package/d3-force-3d-webgpu">npm</a>
+  </div>
+
+  <p>20,000 nodes in 3D: <strong>5 ms per tick</strong> instead of 214. Every built-in force runs on the GPU, with an automatic CPU fallback.</p>
+
+<pre>import {forceSimulationGPU, forceManyBody, forceLink} from "https://cdn.jsdelivr.net/npm/d3-force-3d-webgpu/+esm";
+
+const simulation = forceSimulationGPU(nodes, 3)
+    .force("link", forceLink(links))
+    .force("charge", forceManyBody())
+    .on("tick", () =&gt; render(nodes));</pre>
+
+  <footer>
+    A fork of <a href="https://github.com/vasturiano/d3-force-3d">vasturiano/d3-force-3d</a>. MIT.
+  </footer>
+</main>
+
+<script>
+  if (!navigator.gpu) document.getElementById("support").style.display = "block";
+</script>

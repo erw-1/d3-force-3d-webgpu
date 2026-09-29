@@ -3,8 +3,8 @@
 //     node examples/serve.mjs [port]
 //
 // then open http://localhost:8080/examples/benchmark.html. The examples import the
-// library straight from src/ and its d3-* dependencies from node_modules/ (import map),
-// so run `npm install` first and serve from the repository root.
+// library straight from src/ and its d3-* dependencies from jsDelivr (import map), so
+// serve from the repository root and stay online. The same files run on GitHub Pages.
 
 import {createServer} from "http";
 import {readFile, stat} from "fs/promises";

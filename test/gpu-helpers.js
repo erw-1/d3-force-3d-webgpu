@@ -1,14 +1,13 @@
 import assert from "assert";
-import {create} from "webgpu";
 import {forceSimulation, forceSimulationGPU} from "../src/index.js";
 
-// A headless WebGPU device (Dawn, via the `webgpu` package). null when there is no
-// adapter, in which case the GPU tests are skipped.
+// A headless WebGPU device (Dawn, via the `webgpu` package). null when the package cannot
+// be loaded or there is no adapter, in which case the GPU tests are skipped.
 var deviceP, keepAlive = []; // Dawn crashes if the GPU/adapter objects are garbage collected
 export function getDevice() {
   return deviceP || (deviceP = (async function() {
     try {
-      var gpu = create([]), adapter = await gpu.requestAdapter();
+      var gpu = (await import("webgpu")).create([]), adapter = await gpu.requestAdapter();
       if (!adapter) return null;
       var device = await adapter.requestDevice();
       keepAlive.push(gpu, adapter, device);

@@ -2,7 +2,7 @@
   "name": "d3-force-3d-webgpu",
   "version": "3.1.0",
   "description": "d3-force-3d with a WebGPU compute backend: force-directed graph layout in 1D, 2D or 3D, running on the GPU.",
-  "homepage": "https://github.com/erw-1/d3-force-3d-webgpu",
+  "homepage": "https://erw-1.github.io/d3-force-3d-webgpu/",
   "repository": {
     "type": "git",
     "url": "https://github.com/erw-1/d3-force-3d-webgpu.git"
