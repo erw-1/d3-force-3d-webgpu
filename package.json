@@ -1,11 +1,11 @@
 {
-  "name": "d3-force-3d",
+  "name": "d3-force-3d-webgpu",
   "version": "3.0.6",
-  "description": "Force-directed graph layout in 1D, 2D or 3D using velocity Verlet integration.",
-  "homepage": "https://github.com/vasturiano/d3-force-3d",
+  "description": "d3-force-3d with a WebGPU compute backend: force-directed graph layout in 1D, 2D or 3D, running on the GPU.",
+  "homepage": "https://github.com/erw-1/d3-force-3d-webgpu",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vasturiano/d3-force-3d.git"
+    "url": "https://github.com/erw-1/d3-force-3d-webgpu.git"
   },
   "keywords": [
     "d3",
@@ -16,7 +16,10 @@
     "force",
     "verlet",
     "infovis",
-    "3d"
+    "3d",
+    "webgpu",
+    "gpu",
+    "compute-shader"
   ],
   "license": "MIT",
   "author": {
@@ -30,10 +33,10 @@
   ],
   "module": "src/index.js",
   "main": "src/index.js",
-  "jsdelivr": "dist/d3-force-3d.min.js",
-  "unpkg": "dist/d3-force-3d.min.js",
+  "jsdelivr": "dist/d3-force-3d-webgpu.min.js",
+  "unpkg": "dist/d3-force-3d-webgpu.min.js",
   "exports": {
-    "umd": "./dist/d3-force-3d.min.js",
+    "umd": "./dist/d3-force-3d-webgpu.min.js",
     "default": "./src/index.js"
   },
   "sideEffects": false,
@@ -49,11 +52,14 @@
     "@rollup/plugin-terser": "^0.4.0",
     "eslint": "^8.33.0",
     "mocha": "^10.2.0",
-    "rollup": "^3.14.0"
+    "rollup": "^3.14.0",
+    "webgpu": "^0.6.1"
   },
   "scripts": {
     "test": "mocha 'test/**/*-test.js' && eslint src test",
-    "prepare": "rm -rf dist && yarn test && rollup -c"
+    "prepublishOnly": "npm test",
+    "prepare": "rollup -c",
+    "examples": "node examples/serve.mjs"
   },
   "engines": {
     "node": ">=12"

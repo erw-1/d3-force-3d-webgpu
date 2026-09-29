@@ -7,3 +7,7 @@ export {default as forceSimulation} from "./simulation.js";
 export {default as forceX} from "./x.js";
 export {default as forceY} from "./y.js";
 export {default as forceZ} from "./z.js";
+
+// WebGPU-accelerated simulation
+export {default as forceSimulationGPU} from "./gpu/simulation.js";
+export {isWebGPUAvailable, checkWebGPUSupport} from "./gpu/device.js";

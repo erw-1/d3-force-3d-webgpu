@@ -15,7 +15,8 @@ export default function() {
       strengths,
       distanceMin2 = 1,
       distanceMax2 = Infinity,
-      theta2 = 0.81;
+      theta2 = 0.81,
+      version = 0;
 
   function force(_) {
     var i,
@@ -35,6 +36,7 @@ export default function() {
     var i, n = nodes.length, node;
     strengths = new Array(n);
     for (i = 0; i < n; ++i) node = nodes[i], strengths[node.index] = +strength(node, i, nodes);
+    ++version;
   }
 
   function accumulate(treeNode) {
@@ -133,6 +135,12 @@ export default function() {
 
   force.theta = function(_) {
     return arguments.length ? (theta2 = _ * _, force) : Math.sqrt(theta2);
+  };
+
+  // Description of this force for the WebGPU simulation, which evaluates it exactly
+  // (all pairs) and therefore ignores theta.
+  force.gpu = function() {
+    return {type: "manyBody", version: version, strengths: strengths, distanceMin2: distanceMin2, distanceMax2: distanceMax2};
   };
 
   return force;

@@ -22,7 +22,8 @@ export default function(links) {
       count,
       bias,
       random,
-      iterations = 1;
+      iterations = 1,
+      version = 0;
 
   if (links == null) links = [];
 
@@ -83,6 +84,7 @@ export default function(links) {
     for (var i = 0, n = links.length; i < n; ++i) {
       strengths[i] = +strength(links[i], i, links);
     }
+    ++version;
   }
 
   function initializeDistance() {
@@ -91,6 +93,7 @@ export default function(links) {
     for (var i = 0, n = links.length; i < n; ++i) {
       distances[i] = +distance(links[i], i, links);
     }
+    ++version;
   }
 
   force.initialize = function(_nodes, ...args) {
@@ -118,6 +121,11 @@ export default function(links) {
 
   force.distance = function(_) {
     return arguments.length ? (distance = typeof _ === "function" ? _ : constant(+_), initializeDistance(), force) : distance;
+  };
+
+  // Description of this force for the WebGPU simulation.
+  force.gpu = function() {
+    return {type: "link", version: version, links: links, iterations: iterations, strengths: strengths, distances: distances, bias: bias};
   };
 
   return force;

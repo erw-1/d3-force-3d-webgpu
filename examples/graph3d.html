@@ -1,0 +1,309 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d3-force-3d on WebGPU: a 3D graph drawn straight from the simulation's buffers</title>
+<script type="importmap">
+{
+  "imports": {
+    "d3-dispatch": "../node_modules/d3-dispatch/src/index.js",
+    "d3-timer": "../node_modules/d3-timer/src/index.js",
+    "d3-quadtree": "../node_modules/d3-quadtree/src/index.js",
+    "d3-binarytree": "../node_modules/d3-binarytree/src/index.js",
+    "d3-octree": "../node_modules/d3-octree/src/index.js"
+  }
+}
+</script>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d12; color: #cfd6e4; font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  #hud { position: fixed; top: 12px; left: 12px; padding: 10px 12px; background: rgba(15, 18, 26, .82); border: 1px solid #262c3a; border-radius: 8px; max-width: 21rem; backdrop-filter: blur(6px); }
+  #hud h1 { font-size: 13px; margin: 0 0 6px; color: #fff; }
+  #hud label { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 4px 0; }
+  #hud input[type=range] { width: 8.5rem; }
+  #hud select, #hud button { font: inherit; background: #1a2030; color: inherit; border: 1px solid #333c52; border-radius: 4px; padding: 2px 6px; }
+  #hud button { cursor: pointer; }
+  #stats { margin-top: 6px; color: #8f9bb3; font-variant-numeric: tabular-nums; white-space: pre; }
+  #error { position: fixed; inset: 0; display: none; place-items: center; text-align: center; padding: 2rem; }
+</style>
+
+<canvas id="canvas"></canvas>
+<div id="hud">
+  <h1>d3-force-3d · WebGPU</h1>
+  <label>Nodes
+    <select id="count">
+      <option>1000</option><option>5000</option><option selected>20000</option>
+      <option>50000</option><option>100000</option><option>200000</option>
+    </select>
+  </label>
+  <label>Charge strength <input id="charge" type="range" min="1" max="200" value="30"></label>
+  <label>Link distance <input id="distance" type="range" min="1" max="100" value="30"></label>
+  <label><span>Simulation <button id="reheat">Reheat</button></span> <span><input id="rotate" type="checkbox" checked> auto-rotate</span></label>
+  <div id="stats"></div>
+</div>
+<div id="error"></div>
+
+<script type="module">
+import {forceSimulationGPU, forceManyBody, forceLink, forceCenter, isWebGPUAvailable} from "../src/index.js";
+
+var $ = function(id) { return document.getElementById(id); },
+    params = new URLSearchParams(location.search),
+    canvas = $("canvas");
+
+if (params.get("n")) $("count").value = params.get("n");
+if (params.get("rotate") === "0") $("rotate").checked = false;
+
+function fail(message) {
+  $("error").style.display = "grid";
+  $("error").textContent = message;
+  $("hud").style.display = "none";
+}
+
+// ---------------------------------------------------------------------------------------
+// Rendering: billboarded discs for the nodes, line segments for the links. Both read the
+// node positions from the simulation's own GPU buffer, so the layout never touches the CPU.
+
+var SHADER = /* wgsl */`
+struct Frame {
+  viewProj: mat4x4<f32>,
+  resolution: vec2<f32>,
+  pointSize: f32,
+  pad: f32,
+}
+@group(0) @binding(0) var<uniform> frame: Frame;
+@group(0) @binding(1) var<storage, read> positions: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> links: array<vec2<u32>>;
+@group(0) @binding(3) var<storage, read> degree: array<f32>;
+
+struct NodeOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) color: vec3<f32>,
+}
+
+@vertex
+fn nodeVS(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> NodeOut {
+  var corners = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));
+  let corner = corners[vi];
+  let d = degree[ii];
+  let radius = frame.pointSize * (1.0 + 0.45 * log2(1.0 + d));
+  var clip = frame.viewProj * vec4<f32>(positions[ii].xyz, 1.0);
+  clip = vec4<f32>(clip.xy + corner * radius * 2.0 / frame.resolution * clip.w, clip.zw);
+  let t = clamp(log2(1.0 + d) / 5.0, 0.0, 1.0);
+  var out: NodeOut;
+  out.position = clip;
+  out.uv = corner;
+  out.color = mix(vec3<f32>(0.32, 0.58, 1.0), vec3<f32>(1.0, 0.72, 0.28), t);
+  return out;
+}
+
+@fragment
+fn nodeFS(in: NodeOut) -> @location(0) vec4<f32> {
+  let r2 = dot(in.uv, in.uv);
+  if (r2 > 1.0) { discard; }
+  return vec4<f32>(in.color * (0.55 + 0.45 * sqrt(1.0 - r2)), 1.0);
+}
+
+@vertex
+fn linkVS(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> @builtin(position) vec4<f32> {
+  let l = links[ii];
+  return frame.viewProj * vec4<f32>(positions[select(l.x, l.y, vi == 1u)].xyz, 1.0);
+}
+
+@fragment
+fn linkFS() -> @location(0) vec4<f32> {
+  return vec4<f32>(0.55, 0.65, 0.9, 0.16);
+}
+`;
+
+// column-major 4x4 helpers
+function multiply(a, b) {
+  var out = new Float32Array(16);
+  for (var c = 0; c < 4; ++c) for (var r = 0; r < 4; ++r) {
+    var s = 0;
+    for (var k = 0; k < 4; ++k) s += a[k * 4 + r] * b[c * 4 + k];
+    out[c * 4 + r] = s;
+  }
+  return out;
+}
+
+function perspective(fovY, aspect, near, far) {
+  var f = 1 / Math.tan(fovY / 2), nf = 1 / (near - far);
+  return new Float32Array([f / aspect, 0, 0, 0,  0, f, 0, 0,  0, 0, far * nf, -1,  0, 0, far * near * nf, 0]);
+}
+
+function lookAt(e, t, up) {
+  var z = normalize([e[0] - t[0], e[1] - t[1], e[2] - t[2]]),
+      x = normalize(cross(up, z)),
+      y = cross(z, x);
+  return new Float32Array([x[0], y[0], z[0], 0,  x[1], y[1], z[1], 0,  x[2], y[2], z[2], 0,
+      -(x[0] * e[0] + x[1] * e[1] + x[2] * e[2]), -(y[0] * e[0] + y[1] * e[1] + y[2] * e[2]), -(z[0] * e[0] + z[1] * e[1] + z[2] * e[2]), 1]);
+}
+function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+function normalize(v) { var l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }
+
+// ---------------------------------------------------------------------------------------
+
+var camera = {yaw: 0.6, pitch: 0.35, distance: 400, target: 400},
+    device, format, context, depth, pipelines, frameBuffer, current = null, drag = null;
+
+// Communities of ~120 nodes, densely linked inside and sparsely between, so that clusters
+// show up in the layout.
+function makeGraph(n) {
+  var s = 42, nodes = [], links = [], degree = new Float32Array(n), size = 120, i;
+  function rnd() { return (s = (s * 1664525 + 1013904223) % 4294967296) / 4294967296; }
+  for (i = 0; i < n; ++i) nodes.push({});
+  for (i = 0; i < n; ++i) {
+    var first = i - i % size;
+    if (i > first) links.push({source: i, target: first + Math.floor(rnd() * (i - first))});
+    if (i > first + 2 && rnd() < 0.5) links.push({source: i, target: first + Math.floor(rnd() * (i - first))});
+    if (rnd() < 0.03) links.push({source: i, target: Math.floor(rnd() * n)});
+  }
+  var pairs = new Uint32Array(links.length * 2);
+  links.forEach(function(l, k) {
+    pairs[2 * k] = l.source, pairs[2 * k + 1] = l.target;
+    ++degree[l.source], ++degree[l.target];
+  });
+  return {nodes: nodes, links: links, pairs: pairs, degree: degree};
+}
+
+function storage(data) {
+  var buffer = device.createBuffer({size: Math.max(16, data.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+  device.queue.writeBuffer(buffer, 0, data);
+  return buffer;
+}
+
+async function start() {
+  if (current) current.sim.destroy(), current.buffers.forEach(function(b) { b.destroy(); });
+  current = null;
+
+  var n = +$("count").value, graph = makeGraph(n),
+      charge = forceManyBody().strength(-$("charge").value),
+      link = forceLink(graph.links).distance(+$("distance").value),
+      sim = forceSimulationGPU(graph.nodes, 3, {device: device, readback: false})
+          .force("link", link).force("charge", charge).force("center", forceCenter()),
+      state = {sim: sim, charge: charge, link: link, graph: graph, ticks: 0, buffers: []};
+
+  current = state;
+  sim.on("tick", function() { ++state.ticks; });
+  if (!await sim.gpuReady()) return fail("The simulation could not start on the GPU.");
+
+  var positions = sim.gpuBuffers().positions, linkBuffer = storage(graph.pairs), degreeBuffer = storage(graph.degree);
+  state.buffers = [linkBuffer, degreeBuffer];
+  state.nodeGroup = device.createBindGroup({layout: pipelines.node.getBindGroupLayout(0), entries: [
+    {binding: 0, resource: {buffer: frameBuffer}}, {binding: 1, resource: {buffer: positions}}, {binding: 3, resource: {buffer: degreeBuffer}}]});
+  state.linkGroup = device.createBindGroup({layout: pipelines.link.getBindGroupLayout(0), entries: [
+    {binding: 0, resource: {buffer: frameBuffer}}, {binding: 1, resource: {buffer: positions}}, {binding: 2, resource: {buffer: linkBuffer}}]});
+  state.nodeCount = n, state.linkCount = graph.links.length;
+
+  camera.target = camera.distance = 12 * Math.cbrt(n) + 100;
+  fitLoop(state);
+}
+
+// Once a second, read the layout back (the one place it is needed on the CPU) to size the view.
+async function fitLoop(state) {
+  while (current === state) {
+    await state.sim.sync();
+    var nodes = state.graph.nodes, s = 0;
+    for (var i = 0; i < nodes.length; ++i) s += nodes[i].x * nodes[i].x + nodes[i].y * nodes[i].y + nodes[i].z * nodes[i].z;
+    if (s > 0) camera.target = 3.2 * Math.sqrt(s / nodes.length) + 40;
+    await new Promise(function(resolve) { setTimeout(resolve, 1000); });
+  }
+}
+
+function resize() {
+  var dpr = window.devicePixelRatio || 1, w = Math.max(1, Math.floor(canvas.clientWidth * dpr)), h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  if (canvas.width === w && canvas.height === h && depth) return;
+  canvas.width = w, canvas.height = h;
+  if (depth) depth.destroy();
+  depth = device.createTexture({size: [w, h], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT});
+}
+
+var lastFrame = 0, fps = 0, lastStats = 0, lastTicks = 0, tickRate = 0;
+
+function draw(now) {
+  requestAnimationFrame(draw);
+  resize();
+  var dt = now - lastFrame;
+  lastFrame = now;
+  if (dt > 0) fps = fps * 0.9 + 100 / dt;
+
+  if ($("rotate").checked && !drag) camera.yaw += dt * 0.00012;
+  camera.distance += (camera.target - camera.distance) * 0.06;
+
+  var aspect = canvas.width / canvas.height,
+      distance = camera.distance * Math.max(1, 1 / aspect), // keep the width in view on portrait screens
+      eye = [distance * Math.cos(camera.pitch) * Math.sin(camera.yaw), distance * Math.sin(camera.pitch), distance * Math.cos(camera.pitch) * Math.cos(camera.yaw)],
+      viewProj = multiply(perspective(0.9, aspect, distance * 0.02, distance * 20), lookAt(eye, [0, 0, 0], [0, 1, 0])),
+      frame = new Float32Array(24);
+  frame.set(viewProj, 0);
+  frame[16] = canvas.width, frame[17] = canvas.height, frame[18] = 1.6 * (window.devicePixelRatio || 1);
+  device.queue.writeBuffer(frameBuffer, 0, frame);
+
+  if (current && current.nodeGroup) {
+    var encoder = device.createCommandEncoder(),
+        pass = encoder.beginRenderPass({
+          colorAttachments: [{view: context.getCurrentTexture().createView(), clearValue: {r: 0.043, g: 0.051, b: 0.07, a: 1}, loadOp: "clear", storeOp: "store"}],
+          depthStencilAttachment: {view: depth.createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store"}
+        });
+    pass.setPipeline(pipelines.link);
+    pass.setBindGroup(0, current.linkGroup);
+    pass.draw(2, current.linkCount);
+    pass.setPipeline(pipelines.node);
+    pass.setBindGroup(0, current.nodeGroup);
+    pass.draw(6, current.nodeCount);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+
+    if (now - lastStats > 500) {
+      tickRate = (current.ticks - lastTicks) * 1000 / (now - lastStats);
+      lastTicks = current.ticks, lastStats = now;
+      $("stats").textContent = current.nodeCount.toLocaleString() + " nodes · " + current.linkCount.toLocaleString() + " links\n"
+          + "render " + fps.toFixed(0) + " fps · physics " + tickRate.toFixed(0) + " ticks/s\n"
+          + "alpha " + current.sim.alpha().toFixed(3) + (current.sim.isGPUEnabled() ? " · on GPU" : " · CPU");
+    }
+  }
+}
+
+(async function() {
+  if (!isWebGPUAvailable()) return fail("WebGPU is not available in this browser.");
+  var adapter = await navigator.gpu.requestAdapter({powerPreference: "high-performance"});
+  if (!adapter) return fail("No WebGPU adapter found.");
+  device = await adapter.requestDevice();
+  format = navigator.gpu.getPreferredCanvasFormat();
+  context = canvas.getContext("webgpu");
+  context.configure({device: device, format: format, alphaMode: "opaque"});
+  frameBuffer = device.createBuffer({size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
+
+  var module = device.createShaderModule({code: SHADER}),
+      depthStencil = function(write) { return {format: "depth24plus", depthWriteEnabled: write, depthCompare: "less"}; };
+  pipelines = {
+    node: device.createRenderPipeline({layout: "auto", vertex: {module: module, entryPoint: "nodeVS"},
+      fragment: {module: module, entryPoint: "nodeFS", targets: [{format: format}]}, primitive: {topology: "triangle-list"}, depthStencil: depthStencil(true)}),
+    link: device.createRenderPipeline({layout: "auto", vertex: {module: module, entryPoint: "linkVS"},
+      fragment: {module: module, entryPoint: "linkFS", targets: [{format: format, blend: {
+        color: {srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha"}, alpha: {srcFactor: "one", dstFactor: "one-minus-src-alpha"}}}]},
+      primitive: {topology: "line-list"}, depthStencil: depthStencil(false)})
+  };
+
+  $("count").addEventListener("change", start);
+  $("charge").addEventListener("input", function() { if (current) current.charge.strength(-$("charge").value), current.sim.alpha(Math.max(current.sim.alpha(), 0.3)).restart(); });
+  $("distance").addEventListener("input", function() { if (current) current.link.distance(+$("distance").value), current.sim.alpha(Math.max(current.sim.alpha(), 0.3)).restart(); });
+  $("reheat").addEventListener("click", function() { if (current) current.sim.alpha(1).restart(); });
+
+  canvas.addEventListener("pointerdown", function(e) { drag = {x: e.clientX, y: e.clientY}; canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener("pointermove", function(e) {
+    if (!drag) return;
+    camera.yaw -= (e.clientX - drag.x) * 0.006;
+    camera.pitch = Math.max(-1.5, Math.min(1.5, camera.pitch + (e.clientY - drag.y) * 0.006));
+    drag.x = e.clientX, drag.y = e.clientY;
+  });
+  canvas.addEventListener("pointerup", function() { drag = null; });
+  canvas.addEventListener("wheel", function(e) { e.preventDefault(); camera.target *= Math.exp(e.deltaY * 0.001); camera.distance = camera.target; }, {passive: false});
+
+  requestAnimationFrame(draw);
+  start();
+})();
+</script>

@@ -45,5 +45,10 @@ export default function(x, y, z) {
     return arguments.length ? (strength = +_, force) : strength;
   };
 
+  // Description of this force for the WebGPU simulation.
+  force.gpu = function() {
+    return {type: "center", version: 0, x: x, y: y, z: z, strength: strength};
+  };
+
   return force;
 }

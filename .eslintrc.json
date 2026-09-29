@@ -9,5 +9,11 @@
   },
   "rules": {
     "no-cond-assign": 0
-  }
+  },
+  "overrides": [
+    {
+      "files": ["src/gpu/**/*.js"],
+      "env": {"browser": true}
+    }
+  ]
 }

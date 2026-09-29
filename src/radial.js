@@ -5,7 +5,8 @@ export default function(radius, x, y, z) {
       nDim,
       strength = constant(0.1),
       strengths,
-      radiuses;
+      radiuses,
+      version = 0;
 
   if (typeof radius !== "function") radius = constant(+radius);
   if (x == null) x = 0;
@@ -35,6 +36,7 @@ export default function(radius, x, y, z) {
       radiuses[i] = +radius(nodes[i], i, nodes);
       strengths[i] = isNaN(radiuses[i]) ? 0 : +strength(nodes[i], i, nodes);
     }
+    ++version;
   }
 
   force.initialize = function(initNodes, ...args) {
@@ -61,6 +63,11 @@ export default function(radius, x, y, z) {
 
   force.z = function(_) {
     return arguments.length ? (z = +_, force) : z;
+  };
+
+  // Description of this force for the WebGPU simulation.
+  force.gpu = function() {
+    return {type: "radial", version: version, radiuses: radiuses, strengths: strengths, x: x, y: y, z: z};
   };
 
   return force;

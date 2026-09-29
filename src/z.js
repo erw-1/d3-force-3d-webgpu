@@ -4,7 +4,8 @@ export default function(z) {
   var strength = constant(0.1),
       nodes,
       strengths,
-      zz;
+      zz,
+      version = 0;
 
   if (typeof z !== "function") z = constant(z == null ? 0 : +z);
 
@@ -22,6 +23,7 @@ export default function(z) {
     for (i = 0; i < n; ++i) {
       strengths[i] = isNaN(zz[i] = +z(nodes[i], i, nodes)) ? 0 : +strength(nodes[i], i, nodes);
     }
+    ++version;
   }
 
   force.initialize = function(_) {
@@ -35,6 +37,11 @@ export default function(z) {
 
   force.z = function(_) {
     return arguments.length ? (z = typeof _ === "function" ? _ : constant(+_), initialize(), force) : z;
+  };
+
+  // Description of this force for the WebGPU simulation.
+  force.gpu = function() {
+    return {type: "position", axis: 2, version: version, targets: zz, strengths: strengths};
   };
 
   return force;

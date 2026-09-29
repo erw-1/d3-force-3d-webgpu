@@ -1,5 +1,7 @@
-d3-force-3d
+d3-force-3d-webgpu
 ==============
+
+> **This is a fork of [vasturiano/d3-force-3d](https://github.com/vasturiano/d3-force-3d) that adds a WebGPU compute backend.** Everything below the [WebGPU simulation](#webgpu-simulation) section is the unchanged upstream documentation; the CPU simulation and forces behave exactly as before. [`forceSimulationGPU`](#webgpu-simulation) is a drop-in for [`forceSimulation`](#simulation) that runs the same forces on the GPU.
 
 [![NPM package][npm-img]][npm-url]
 [![Build Size][build-size-img]][build-size-url]
@@ -29,19 +31,21 @@ To use this module, create a [simulation](#simulation) for an array of [nodes](#
 
 ## Installing
 
-If you use npm, `npm install d3-force-3d`. You can also load directly from the global [npmJS](https://npmjs.com) registry, as a bundled [standalone library](https://cdn.jsdelivr.net/npm/d3-force-3d). For vanilla HTML in modern browsers, import d3-force-3d from Skypack:
+If you use npm, `npm install d3-force-3d-webgpu`. For vanilla HTML in modern browsers, import it as an ES module from jsDelivr (which bundles the `d3-*` dependencies for you):
 
 ```html
 <script type="module">
 
-import {forceSimulation} from "https://cdn.skypack.dev/d3-force-3d";
+import {forceSimulationGPU} from "https://cdn.jsdelivr.net/npm/d3-force-3d-webgpu/+esm";
 
-const simulation = forceSimulation(nodes);
+const simulation = forceSimulationGPU(nodes, 3);
 
 </script>
 ```
 
-For legacy environments, you can load d3-force-3d’s UMD bundle from an npm-based CDN such as jsDelivr; a `d3` global is exported:
+Pin a version in production, e.g. `https://cdn.jsdelivr.net/npm/d3-force-3d-webgpu@3.1.0/+esm`.
+
+For legacy environments, you can load the UMD bundle from an npm-based CDN such as jsDelivr; a `d3` global is exported:
 
 ```html
 <script src="https://cdn.jsdelivr.net/npm/d3-dispatch@3"></script>
@@ -49,13 +53,100 @@ For legacy environments, you can load d3-force-3d’s UMD bundle from an npm-bas
 <script src="https://cdn.jsdelivr.net/npm/d3-timer@3"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3-binarytree"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3-octree"></script>
-<script src="https://cdn.jsdelivr.net/npm/d3-force-3d"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-force-3d-webgpu"></script>
 <script>
 
-const simulation = d3.forceSimulation(nodes);
+const simulation = d3.forceSimulationGPU(nodes, 3);
 
 </script>
 ```
+
+## WebGPU simulation
+
+```js
+import {forceSimulationGPU, forceLink, forceManyBody, forceCenter} from "d3-force-3d-webgpu";
+
+const simulation = forceSimulationGPU(nodes, 3)   // same arguments as forceSimulation
+    .force("link", forceLink(links).id(d => d.id))
+    .force("charge", forceManyBody())
+    .force("center", forceCenter())
+    .on("tick", () => render(nodes));            // nodes.x/y/z are set, as usual
+```
+
+The forces are the ones you already use (`forceManyBody`, `forceLink`, `forceCenter`, `forceCollide`, `forceRadial`, `forceX`, `forceY`, `forceZ`, with per-node accessors, `iterations`, `distanceMin`/`distanceMax`, fixed `fx`/`fy`/`fz`, 1, 2 or 3 dimensions). Node positions and velocities live in GPU buffers; each tick runs every force and the integration in a single command submission, and the result is copied back into your node objects asynchronously. Where WebGPU is unavailable, or the simulation contains a force that has no GPU implementation, it runs on the CPU exactly like `forceSimulation` (a warning names the force).
+
+Try it: `npm install && npm run examples`, then open <http://localhost:8080/examples/benchmark.html> (CPU vs GPU timings) or <http://localhost:8080/examples/graph3d.html> (a 3D graph rendered straight from the simulation's GPU buffers).
+
+### Performance
+
+Milliseconds per tick for a 3D graph with `forceLink` + `forceManyBody` + `forceCenter`, 1.5 links per node, measured in Chromium on an NVIDIA RTX-class GPU (yours will differ; `examples/benchmark.html` measures your own):
+
+| nodes  | CPU (`forceSimulation`) | GPU (`forceSimulationGPU`) | speed-up |
+|-------:|------------------------:|---------------------------:|---------:|
+|  1,000 |                  5.7 ms |                    0.61 ms |      9×  |
+|  5,000 |                 36.9 ms |                    2.99 ms |     12×  |
+| 20,000 |                  214 ms |                    5.38 ms |     40×  |
+| 50,000 |                       – |                    9.9 ms  |          |
+| 100,000 |                      – |                   21.5 ms  |          |
+| 200,000 |                      – |                   77.7 ms  |          |
+
+The many-body force is an exact, tiled all-pairs kernel (O(n²)), so cost grows quadratically; that is very fast up to ~100k nodes on a discrete GPU and proportionally slower on integrated ones.
+
+### How results differ from the CPU simulation
+
+Every GPU force is tested against its CPU counterpart on identical input (1D, 2D and 3D; agreement to ~1e-4 relative, limited by f32). Where the algorithms differ on purpose, you should know:
+
+* **Many-body is exact; `theta` is ignored.** The CPU force uses a Barnes-Hut tree. In 1D and 2D that is a close approximation of the exact sum, and results match. In **3D** `d3-force-3d`'s octree additionally scales down the strength of every aggregated cell (`strength *= sqrt(4 / numChildren)`, a factor 0.71 per octree level), so its far-field repulsion is deliberately weaker than the exact sum, and the layout gets more compact as `theta` grows. The GPU force is the exact sum, which is what the CPU converges to as `theta → 0`. For the same graph (1,000 nodes) after 300 ticks the RMS radius of the layout is: 2D: 536 for every `theta` and on the GPU; 3D: 377 (`theta` 0.9, the default), 425 (0.5), 506 (0.2), 551 (≈0) on the CPU, and 553 on the GPU. So **at default settings a 3D layout comes out larger on the GPU** (about 1.5× at 1,000 nodes, growing with the node count); scale `forceManyBody().strength(...)` down to compensate, or treat it as the physically exact result.
+* **`forceLink` and `forceCollide` are resolved simultaneously, not one after another.** The CPU forces visit links/pairs in order, so later ones see the velocity changes of earlier ones; the GPU forces compute each node's response against a snapshot of positions + velocities. Every link or pair contributes the same amount as on the CPU, and links/pairs that share no node match it exactly (to f32 precision). With shared nodes the layouts converge to the same quality: in 2D, where the many-body forces agree, the mean link length of a 1,000-node random graph after 300 ticks is 191 on the CPU and 192 on the GPU. Collisions differ most in dense, confined packings, where resolving every contact at once is jittier than resolving them in sequence: at moderate density the residual speed matches the CPU from `forceCollide().iterations(2)` on, but in a deliberately jammed test it stays 2-4× higher at any iteration count (with a similar amount of overlap either way). Averaging the pushes over the contacts removes the jitter but leaves noticeably more overlap, so the exact pairwise rule was kept.
+* **f32, not f64.** Positions and velocities are stored as 32-bit floats on the GPU. Coincident nodes are separated with a hash-based jiggle instead of `randomSource`, which only seeds it: results are reproducible for a given `randomSource` but not identical to the CPU's.
+* **Node objects are updated asynchronously.** See below.
+
+### Reading the nodes
+
+The GPU cannot be waited on synchronously in a browser, so unlike `forceSimulation`, a call to [*simulation*.tick](#simulation_tick) does not leave the nodes up to date:
+
+* Timer-driven simulations (the default) are unaffected: `"tick"` events fire once the latest positions have been copied into the nodes.
+* `simulation.tick()` submits the steps to the GPU and returns; the nodes follow about a frame later. Calling `tick()` once per frame is fine (a tick is skipped if the GPU is still busy with earlier ones), and so is a synchronous loop of `tick()` calls (a warm-up); all of them run.
+* To run a layout and then read it, **await** it: `await simulation.tickAsync(300)`.
+* Edits you make to nodes while the simulation runs are honoured: pinning with `fx`/`fy`/`fz` (dragging), and setting `x`/`y`/`z` directly. Velocities are read back into `vx`/`vy`/`vz` but the GPU owns them: set `fx`/`x` instead.
+
+### API additions
+
+<a name="forceSimulationGPU" href="#forceSimulationGPU">#</a> d3.<b>forceSimulationGPU</b>([<i>nodes</i>[, <i>numDimensions</i>[, <i>options</i>]]])
+
+Like [forceSimulation](#forceSimulation), running on the GPU. Options: `device` (a `GPUDevice` to run on, e.g. the one your renderer uses), `gpu` (a `GPU` object to request a device from, e.g. from Node's [`webgpu`](https://www.npmjs.com/package/webgpu) package) and `readback` (`false` to skip copying positions into the nodes on every tick, for renderers that draw from the GPU buffers; the nodes are then only updated by `sync()` and `tickAsync()`).
+
+<a name="simulation_gpuReady" href="#simulation_gpuReady">#</a> <i>simulation</i>.<b>gpuReady</b>()
+
+Returns a promise for whether the GPU is in use once setup has finished (`false`: running on the CPU). Until then the timer idles, and a manual `tick()` runs on the CPU.
+
+<a name="simulation_isGPUEnabled" href="#simulation_isGPUEnabled">#</a> <i>simulation</i>.<b>isGPUEnabled</b>()
+
+Whether the physics currently runs on the GPU.
+
+<a name="simulation_tickAsync" href="#simulation_tickAsync">#</a> <i>simulation</i>.<b>tickAsync</b>([<i>iterations</i>])
+
+Runs *iterations* ticks (default 1) and returns a promise for the simulation, resolved once the nodes reflect them.
+
+<a name="simulation_sync" href="#simulation_sync">#</a> <i>simulation</i>.<b>sync</b>()
+
+Returns a promise for the simulation, resolved once the nodes reflect everything the GPU has computed so far.
+
+<a name="simulation_gpuBuffers" href="#simulation_gpuBuffers">#</a> <i>simulation</i>.<b>gpuBuffers</b>()
+
+Returns `{positions, velocities, count, stride}`, the simulation's `GPUBuffer`s (a `vec4<f32>` per node, `xyz` used, `stride` 16 bytes), or null before the GPU is ready. Bind `positions` as a read-only storage buffer in your own render or compute pipeline to draw the layout without reading it back (see `examples/graph3d.html`); create the simulation with `{device}` set to the device that renders. The buffers are replaced by <i>simulation</i>.nodes().
+
+<a name="simulation_destroy" href="#simulation_destroy">#</a> <i>simulation</i>.<b>destroy</b>()
+
+Stops the simulation and releases its GPU resources.
+
+<a name="isWebGPUAvailable" href="#isWebGPUAvailable">#</a> d3.<b>isWebGPUAvailable</b>() · d3.<b>checkWebGPUSupport</b>()
+
+Synchronously / asynchronously (a promise, which also checks that an adapter exists) test for WebGPU support.
+
+### Forces on the GPU
+
+A force runs on the GPU if it has a `force.gpu()` method returning a description of it (`{type, version, ...}`); every force in this package does. Custom forces written as plain functions have none, so a simulation that uses one runs entirely on the CPU. (Supporting them by round-tripping through the CPU each tick is possible but not implemented.)
 
 ## API Reference
 

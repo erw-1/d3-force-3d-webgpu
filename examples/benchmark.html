@@ -1,0 +1,172 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d3-force-3d WebGPU benchmark</title>
+<script type="importmap">
+{
+  "imports": {
+    "d3-dispatch": "../node_modules/d3-dispatch/src/index.js",
+    "d3-timer": "../node_modules/d3-timer/src/index.js",
+    "d3-quadtree": "../node_modules/d3-quadtree/src/index.js",
+    "d3-binarytree": "../node_modules/d3-binarytree/src/index.js",
+    "d3-octree": "../node_modules/d3-octree/src/index.js"
+  }
+}
+</script>
+<style>
+  body { font: 14px/1.45 system-ui, sans-serif; margin: 2rem auto; max-width: 56rem; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; margin-bottom: .2rem; }
+  .muted { color: #666; }
+  form { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; align-items: end; margin: 1rem 0; }
+  label { display: flex; flex-direction: column; font-size: .8rem; color: #555; gap: .2rem; }
+  input, select { font: inherit; padding: .3rem .4rem; }
+  button { font: inherit; padding: .4rem 1rem; cursor: pointer; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: .3rem .6rem; border-bottom: 1px solid #ddd; }
+  th:first-child, td:first-child { text-align: left; }
+  td.win { font-weight: 600; }
+  #log { color: #a30; white-space: pre-wrap; }
+</style>
+
+<h1>d3-force-3d: CPU vs WebGPU</h1>
+<div class="muted" id="env">detecting WebGPU…</div>
+
+<form id="form">
+  <label>Node counts <input id="sizes" value="1000, 5000, 20000" size="24"></label>
+  <label>Dimensions
+    <select id="dims"><option>1</option><option>2</option><option selected>3</option></select>
+  </label>
+  <label>Forces
+    <select id="forces">
+      <option value="typical">link + charge + center</option>
+      <option value="collide">link + charge + center + collide</option>
+      <option value="charge">charge only</option>
+      <option value="link">link + center (no charge)</option>
+    </select>
+  </label>
+  <label>CPU up to n = <input id="cpuMax" value="20000" size="8"></label>
+  <button id="run">Run</button>
+</form>
+
+<table id="results">
+  <thead><tr><th>nodes / links</th><th>CPU ms/tick</th><th>GPU ms/tick</th><th>speed-up</th></tr></thead>
+  <tbody></tbody>
+</table>
+<div id="log"></div>
+
+<script type="module">
+import {forceSimulation, forceSimulationGPU, forceManyBody, forceLink, forceCenter, forceCollide, isWebGPUAvailable} from "../src/index.js";
+
+var $ = function(id) { return document.getElementById(id); },
+    params = new URLSearchParams(location.search);
+
+for (var [key, value] of params) if ($(key) && key !== "run") $(key).value = value;
+
+function log(text) { $("log").textContent += text + "\n"; }
+function frame() { return new Promise(function(resolve) { setTimeout(resolve, 0); }); }
+
+// Deterministic random tree plus extra random links.
+function makeGraph(n, dims) {
+  var s = 42, links = [], nodes = [];
+  function rnd() { return (s = (s * 1664525 + 1013904223) % 4294967296) / 4294967296; }
+  for (var i = 0; i < n; ++i) nodes.push({});
+  for (i = 1; i < n; ++i) links.push({source: i, target: Math.floor(rnd() * i)});
+  for (i = 0; i < n / 2; ++i) links.push({source: Math.floor(rnd() * n), target: Math.floor(rnd() * n)});
+  return {nodes: nodes, links: links};
+}
+
+function setup(sim, graph, kind) {
+  if (kind !== "charge") sim.force("link", forceLink(graph.links).distance(30));
+  if (kind !== "link") sim.force("charge", forceManyBody());
+  sim.force("center", forceCenter());
+  if (kind === "collide") sim.force("collide", forceCollide(3));
+  return sim;
+}
+
+async function timeCPU(graph, dims, kind, budget) {
+  var sim = setup(forceSimulation(graph.nodes, dims).stop(), graph, kind), ticks = 0, t0 = performance.now();
+  sim.tick(1); // includes any lazy setup
+  t0 = performance.now();
+  while (ticks < 300 && (performance.now() - t0 < budget || ticks < 3)) sim.tick(1), ++ticks;
+  return {ms: (performance.now() - t0) / ticks, ticks: ticks};
+}
+
+async function timeGPU(graph, dims, kind, budget) {
+  var sim = setup(forceSimulationGPU(graph.nodes, dims).stop(), graph, kind);
+  if (!await sim.gpuReady()) throw new Error("the simulation fell back to the CPU");
+  await sim.tickAsync(3); // warm-up
+  var ticks = 10, t0;
+  // grow the batch until it takes a measurable time
+  while (true) {
+    t0 = performance.now();
+    await sim.tickAsync(ticks);
+    var dt = performance.now() - t0;
+    if (dt > budget / 2 || ticks >= 640) return sim.destroy(), {ms: dt / ticks, ticks: ticks};
+    ticks *= 2;
+  }
+}
+
+function addRow(cells) {
+  var tr = document.createElement("tr");
+  cells.forEach(function(c) {
+    var td = document.createElement("td");
+    td.textContent = c.text === undefined ? c : c.text;
+    if (c.win) td.className = "win";
+    tr.appendChild(td);
+  });
+  $("results").tBodies[0].appendChild(tr);
+}
+
+var results = window.__results = [];
+
+async function run() {
+  $("run").disabled = true;
+  $("results").tBodies[0].innerHTML = "";
+  $("log").textContent = "";
+  results.length = 0;
+  document.body.removeAttribute("data-done");
+
+  var dims = +$("dims").value, kind = $("forces").value, cpuMax = +$("cpuMax").value,
+      sizes = $("sizes").value.split(/[\s,]+/).map(Number).filter(Boolean);
+
+  for (var n of sizes) {
+    var row = {n: n, dims: dims, kind: kind}, graph;
+    try {
+      graph = makeGraph(n, dims);
+      row.gpu = await timeGPU(graph, dims, kind, 1500);
+      row.links = graph.links.length;
+    } catch (error) {
+      log("GPU run failed for n = " + n + ": " + error);
+    }
+    if (n <= cpuMax) {
+      await frame();
+      graph = makeGraph(n, dims);
+      row.cpu = await timeCPU(graph, dims, kind, 1500);
+    }
+    results.push(row);
+    addRow([
+      n + " / " + (row.links || Math.round(n * 1.5)),
+      row.cpu ? row.cpu.ms.toFixed(2) : "-",
+      row.gpu ? row.gpu.ms.toFixed(2) : "-",
+      row.cpu && row.gpu ? {text: (row.cpu.ms / row.gpu.ms).toFixed(1) + "×", win: row.cpu.ms > row.gpu.ms} : "-"
+    ]);
+    await frame();
+  }
+  $("run").disabled = false;
+  document.body.setAttribute("data-done", "1");
+}
+
+$("form").addEventListener("submit", function(event) { event.preventDefault(); run(); });
+
+(async function() {
+  var text = "WebGPU: ";
+  if (!isWebGPUAvailable()) text += "not available in this browser — the GPU column will fail.";
+  else {
+    var adapter = await navigator.gpu.requestAdapter();
+    var info = adapter && adapter.info || {};
+    text += adapter ? [info.vendor, info.architecture, info.description].filter(Boolean).join(" · ") || "adapter found" : "no adapter";
+  }
+  $("env").textContent = text;
+  if (params.get("auto")) run();
+})();
+</script>

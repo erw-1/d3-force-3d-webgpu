@@ -22,7 +22,8 @@ export default function(radius) {
       radii,
       random,
       strength = 1,
-      iterations = 1;
+      iterations = 1,
+      version = 0;
 
   if (typeof radius !== "function") radius = constant(radius == null ? 1 : +radius);
 
@@ -107,6 +108,7 @@ export default function(radius) {
     var i, n = nodes.length, node;
     radii = new Array(n);
     for (i = 0; i < n; ++i) node = nodes[i], radii[node.index] = +radius(node, i, nodes);
+    ++version;
   }
 
   force.initialize = function(_nodes, ...args) {
@@ -126,6 +128,11 @@ export default function(radius) {
 
   force.radius = function(_) {
     return arguments.length ? (radius = typeof _ === "function" ? _ : constant(+_), initialize(), force) : radius;
+  };
+
+  // Description of this force for the WebGPU simulation.
+  force.gpu = function() {
+    return {type: "collide", version: version, radii: radii, strength: strength, iterations: iterations};
   };
 
   return force;
