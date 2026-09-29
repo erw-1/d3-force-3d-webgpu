@@ -8,10 +8,9 @@
 Same forces. Same API. WebGPU compute shaders do the physics.
 
 [<img alt="50,000 nodes in 3D, drawn straight from the simulation's GPU buffers" src="https://raw.githubusercontent.com/erw-1/d3-force-3d-webgpu/master/img/splash.gif" width="860">](https://erw-1.github.io/d3-force-3d-webgpu/examples/graph3d.html)
+ryzen 9 9950x3D vs RTX 4090
 
 **[Live demo](https://erw-1.github.io/d3-force-3d-webgpu/examples/graph3d.html)** · **[Benchmark](https://erw-1.github.io/d3-force-3d-webgpu/examples/benchmark.html)** (needs a WebGPU browser)
-
-20,000 nodes in 3D: **5 ms per tick** instead of 214.
 
 ## What's different
 
