@@ -18,7 +18,8 @@ This is a fork of [vasturiano/d3-force-3d](https://github.com/vasturiano/d3-forc
 
 * **`forceSimulationGPU`**. Drop-in for `forceSimulation`. Same arguments, same methods.
 * **Every built-in force on the GPU.** Many-body, link, collide, center, radial, x, y, z. Accessors, `iterations` and pinning (`fx`/`fy`/`fz`) work too.
-* **Up to 40× faster.** 100k nodes at 21 ms per tick, 200k at 78 ms.
+* **Up to ~550× faster.** 20,000 nodes: 0.24 ms per tick instead of 136. A million nodes: 3.2 ms per tick.
+* **Same layouts as the CPU.** Many-body builds d3-force-3d's own Barnes-Hut tree on the GPU, `theta` and all.
 * **Automatic CPU fallback.** No WebGPU, or a custom force? It runs on the CPU like before.
 * **Draw without readback.** `gpuBuffers()` gives you the position buffer. Render straight from it.
 * **Tested against the CPU forces** in 1D, 2D and 3D.
@@ -72,25 +73,27 @@ Swap the import, and `forceSimulation` for `forceSimulationGPU`. Every other exp
 Also worth a look:
 
 * A **custom force** (a plain function) runs on the CPU, so the whole simulation does.
-* **3D layouts are larger** at default settings. Lower `forceManyBody().strength()` to compensate.
 * **Writing `vx/vy/vz` does nothing.** The GPU owns velocities. Use `x/y/z` or `fx/fy/fz`.
 
 Using 3d-force-graph or force-graph? They create their own `forceSimulation`, so swapping the import alone won't give you the GPU.
 
 ## Speed
 
-Milliseconds per tick. 3D, `forceLink` + `forceManyBody` + `forceCenter`, 1.5 links per node, Chromium on an NVIDIA RTX-class GPU. Yours will differ: run the [benchmark](https://erw-1.github.io/d3-force-3d-webgpu/examples/benchmark.html).
+Milliseconds per tick. 3D, `forceLink` + `forceManyBody` + `forceCenter`, 1.5 links per node. Brave on an RTX 4090, Ryzen 9 9950X3D for the CPU. Yours will differ: run the [benchmark](https://erw-1.github.io/d3-force-3d-webgpu/examples/benchmark.html).
 
-| nodes   | CPU     | GPU      | speed-up |
-|--------:|--------:|---------:|---------:|
-| 1,000   | 5.7 ms  | 0.61 ms  | 9×       |
-| 5,000   | 36.9 ms | 2.99 ms  | 12×      |
-| 20,000  | 214 ms  | 5.38 ms  | 40×      |
-| 50,000  | -       | 9.9 ms   |          |
-| 100,000 | -       | 21.5 ms  |          |
-| 200,000 | -       | 77.7 ms  |          |
+| nodes     | CPU     | GPU      | speed-up |
+|----------:|--------:|---------:|---------:|
+| 1,000     | 3.6 ms  | 0.089 ms | 41×      |
+| 5,000     | 26.9 ms | 0.12 ms  | 232×     |
+| 20,000    | 136 ms  | 0.24 ms  | 556×     |
+| 50,000    | -       | 0.34 ms  |          |
+| 100,000   | -       | 0.47 ms  |          |
+| 200,000   | -       | 0.88 ms  |          |
+| 1,000,000 | -       | 3.2 ms   |          |
 
-The many-body force sums every pair (O(n²)). That's very fast up to ~100k nodes on a discrete GPU, slower on integrated ones.
+Both columns compute the same thing. Every tick the GPU builds d3-force-3d's Barnes-Hut tree: a radix sort of the nodes' Morton codes, a radix tree over them, then one walk down the tree per node. O(n log n), like the CPU. Collide finds its pairs with a grid past 8,192 nodes.
+
+`forceManyBody().theta(0)` sums every pair exactly instead. Slower past ~5,000 nodes, but the fastest below.
 
 ## Try it
 
@@ -102,11 +105,10 @@ You need a browser with WebGPU (recent Chrome, Edge, Safari or Firefox; support 
 
 ## Good to know
 
-The GPU isn't a bit-for-bit copy of the CPU. Three things you might notice:
+The GPU isn't a bit-for-bit copy of the CPU. Two things you might notice:
 
-* **Many-body is exact, `theta` is ignored.** In 3D that gives bigger layouts than the CPU at default settings (~1.5× at 1,000 nodes).
 * **Link and collide resolve all at once.** Same result on links and pairs that don't share a node. Packed collisions are jitterier.
-* **32-bit floats.** Not 64.
+* **32-bit floats.** Not 64. Many-body matches the CPU to ~1e-4, a little less in a few corner cases.
 
 [All the details, with numbers →](docs/differences.md)
 
@@ -118,6 +120,7 @@ Everything in [upstream's API](#api-reference) still applies. On top of it:
   * `device`: a `GPUDevice` to run on (say, your renderer's).
   * `gpu`: a `GPU` to request one from (say, Node's [`webgpu`](https://www.npmjs.com/package/webgpu) package).
   * `readback`: `false` skips copying positions into the nodes on every tick.
+  * `split`: threads per node in the all-pairs kernels (many-body with `theta(0)`, collide below 8,192 nodes). A power of two, picked from the graph size. You rarely need it.
 * **`simulation.gpuReady()`**. Promise: `true` if the GPU is in use, `false` for the CPU.
 * **`simulation.isGPUEnabled()`**. Is it running on the GPU right now?
 * **`simulation.tickAsync([iterations])`**. Run ticks, resolve once the nodes are up to date.

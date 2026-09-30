@@ -24,7 +24,11 @@ export function requestDevice(gpu) {
   if (!promise) {
     devices.set(gpu, promise = gpu.requestAdapter({powerPreference: "high-performance"}).then(function(adapter) {
       if (!adapter) throw new Error("No WebGPU adapter found");
-      return adapter.requestDevice();
+      // the largest buffers the adapter allows: big graphs need more than the defaults
+      return adapter.requestDevice({requiredLimits: {
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxBufferSize: adapter.limits.maxBufferSize
+      }});
     }).then(function(device) {
       device.lost.then(function() { if (devices.get(gpu) === promise) devices.delete(gpu); });
       return device;

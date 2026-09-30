@@ -28,8 +28,7 @@ export function layout0(device) {
     entries: [
       {binding: 0, visibility: COMPUTE, buffer: {type: "uniform", hasDynamicOffset: true, minBindingSize: SIM_BYTES}},
       {binding: 1, visibility: COMPUTE, buffer: BUFFER_TYPES.rw},
-      {binding: 2, visibility: COMPUTE, buffer: BUFFER_TYPES.rw},
-      {binding: 3, visibility: COMPUTE, buffer: BUFFER_TYPES.rw}
+      {binding: 2, visibility: COMPUTE, buffer: BUFFER_TYPES.rw}
     ]
   }));
 }
@@ -48,32 +47,37 @@ export function layout1(device, spec) {
 }
 
 // A pipeline description is {code, entry, spec}; spec is null for kernels that only use
-// group 0.
-function descriptor(device, def) {
+// group 0. `constants` sets the shader's `override` values, specialising it (a kernel
+// tuned to the problem size, say) without another copy of the source.
+function descriptor(device, def, constants) {
   var layouts = [layout0(device)];
   if (def.spec) layouts.push(layout1(device, def.spec));
-  return {
-    layout: device.createPipelineLayout({bindGroupLayouts: layouts}),
-    compute: {module: device.createShaderModule({code: def.code}), entryPoint: def.entry}
-  };
+  var compute = {module: device.createShaderModule({code: def.code}), entryPoint: def.entry};
+  if (constants) compute.constants = constants;
+  return {layout: device.createPipelineLayout({bindGroupLayouts: layouts}), compute: compute};
 }
 
-export function pipeline(device, id, def) {
-  var cache = cacheFor(device), p = cache.pipelines.get(id);
-  if (!p) cache.pipelines.set(id, p = device.createComputePipeline(descriptor(device, def)));
+function keyOf(id, constants) {
+  return constants ? id + JSON.stringify(constants) : id;
+}
+
+export function pipeline(device, id, def, constants) {
+  var cache = cacheFor(device), key = keyOf(id, constants), p = cache.pipelines.get(key);
+  if (!p) cache.pipelines.set(key, p = device.createComputePipeline(descriptor(device, def, constants)));
   return p;
 }
 
-// Compile everything up front, off the main thread. Rejects if a pipeline is invalid (a
-// shader error, say); no error scope is used, so validation errors of the application's
-// own work on a shared device are never captured here.
-export function prewarm(device, defs) {
-  var cache = cacheFor(device);
-  return Promise.all(Object.keys(defs).filter(function(id) {
-    return !cache.pipelines.has(id);
-  }).map(function(id) {
-    return device.createComputePipelineAsync(descriptor(device, defs[id])).then(function(p) {
-      cache.pipelines.set(id, p);
+// Compile pipelines up front, off the main thread: `jobs` is a list of [id, constants].
+// Rejects if a pipeline is invalid (a shader error, say); no error scope is used, so
+// validation errors of the application's own work on a shared device are never captured.
+export function prewarm(device, defs, jobs) {
+  var cache = cacheFor(device), queued = {};
+  return Promise.all(jobs.filter(function(job) {
+    var key = keyOf(job[0], job[1]);
+    return !cache.pipelines.has(key) && !queued[key] && (queued[key] = true);
+  }).map(function(job) {
+    return device.createComputePipelineAsync(descriptor(device, defs[job[0]], job[1])).then(function(p) {
+      cache.pipelines.set(keyOf(job[0], job[1]), p);
     });
   }));
 }

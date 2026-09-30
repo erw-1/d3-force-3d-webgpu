@@ -137,10 +137,10 @@ export default function() {
     return arguments.length ? (theta2 = _ * _, force) : Math.sqrt(theta2);
   };
 
-  // Description of this force for the WebGPU simulation, which evaluates it exactly
-  // (all pairs) and therefore ignores theta.
+  // Description of this force for the WebGPU simulation, which builds the same tree on
+  // the GPU (or sums every pair exactly when theta is 0).
   force.gpu = function() {
-    return {type: "manyBody", version: version, strengths: strengths, distanceMin2: distanceMin2, distanceMax2: distanceMax2};
+    return {type: "manyBody", version: version, strengths: strengths, distanceMin2: distanceMin2, distanceMax2: distanceMax2, theta2: theta2};
   };
 
   return force;

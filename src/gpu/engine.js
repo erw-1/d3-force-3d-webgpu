@@ -13,16 +13,29 @@ var MAX_BATCH = 64;
 var MAX_PENDING = 3;
 
 var definitions = {
-  snapshot: {code: SNAPSHOT, entry: "main", spec: null},
+  snapshot: {code: SNAPSHOT, entry: "main", spec: ["rw"]},
   integrate: {code: INTEGRATE, entry: "main", spec: ["ro", "ro"]}
 };
 Object.keys(passes).forEach(function(type) {
   Object.assign(definitions, passes[type].pipelines);
 });
 
-// Compile every kernel on `device` ahead of time. Rejects on any shader error.
-export function prepare(device) {
-  return prewarm(device, definitions);
+// Compile ahead of time, and in parallel, the kernels a simulation of `n` nodes in `nDim`
+// dimensions uses with forces of the given types (all of them by default): the specialised
+// variants the passes ask for (the many-body tree for these dimensions, say), and their
+// other kernels. Others compile when first needed. Rejects on any shader error.
+export function prepare(device, n, nDim, split, types) {
+  var jobs = [["snapshot"], ["integrate"]], seen = {};
+  (types || Object.keys(passes)).forEach(function(type) {
+    var pass = passes[type];
+    if (!pass || seen[type]) return;
+    seen[type] = true;
+    if (pass.variants) jobs = jobs.concat(pass.variants(n, nDim, split));
+    Object.keys(pass.pipelines).forEach(function(id) {
+      if (!pass.pipelines[id].specialised) jobs.push([id]);
+    });
+  });
+  return prewarm(device, definitions, jobs);
 }
 
 // The name of the first force that cannot run on the GPU, or null.
@@ -46,7 +59,7 @@ function num(v) {
 //     are detected (by comparing against what was last exchanged) and uploaded at the
 //     start of the next step. A node the user has touched is never overwritten by a
 //     readback that was already in flight.
-export default function(device, onLost) {
+export default function(device, onLost, options) {
   var engine,
       nodes = [],
       n = 0,
@@ -222,15 +235,21 @@ export default function(device, onLost) {
     device: device,
 
     get n() { return n; },
+    // threads per node in the all-pairs kernels, when the caller chose one (else automatic)
+    get forcedSplit() { return options && options.split; },
     get nDim() { return nDim; },
 
-    pipeline: function(id) {
-      return pipeline(device, id, definitions[id]);
+    pipeline: function(id, constants) {
+      return pipeline(device, id, definitions[id], constants);
     },
 
-    // Refresh pos + vel into snap, for kernels that read other nodes' predicted positions.
+    // pos + vel, for kernels that read other nodes' predicted positions. snapshot()
+    // refreshes it and leaves bind group 1 for the caller to set.
+    get snap() { return buffers && buffers[2]; },
+
     snapshot: function(pass) {
       pass.setPipeline(engine.pipeline("snapshot"));
+      pass.setBindGroup(1, buffers.bindGroupSnapshot);
       pass.dispatchWorkgroups(ceilDiv(n, WORKGROUP));
     },
 
@@ -263,9 +282,12 @@ export default function(device, onLost) {
         entries: [
           {binding: 0, resource: {buffer: buffers[3], size: SIM_BYTES}},
           {binding: 1, resource: {buffer: buffers[0]}},
-          {binding: 2, resource: {buffer: buffers[1]}},
-          {binding: 3, resource: {buffer: buffers[2]}}
+          {binding: 2, resource: {buffer: buffers[1]}}
         ]
+      });
+      buffers.bindGroupSnapshot = device.createBindGroup({
+        layout: engine.pipeline("snapshot").getBindGroupLayout(1),
+        entries: [{binding: 0, resource: {buffer: buffers[2]}}]
       });
       buffers.bindGroupIntegrate = device.createBindGroup({
         layout: engine.pipeline("integrate").getBindGroupLayout(1),
@@ -298,10 +320,11 @@ export default function(device, onLost) {
       return true;
     },
 
-    // Whether `count` nodes fit within this device's buffer and dispatch limits.
+    // Whether `count` nodes fit within this device's buffer and dispatch limits. The
+    // largest buffer is the many-body tree's, 64 bytes per node.
     fits: function(count) {
       var limits = device.limits;
-      return 16 * count <= Math.min(limits.maxStorageBufferBindingSize, limits.maxBufferSize)
+      return 64 * count <= Math.min(limits.maxStorageBufferBindingSize, limits.maxBufferSize)
           && Math.ceil(count / WORKGROUP) <= limits.maxComputeWorkgroupsPerDimension;
     },
 

@@ -4,9 +4,10 @@
 //
 //   pos   xyz = position                       (w unused)
 //   vel   xyz = velocity                       (w unused)
-//   snap  xyz = position + velocity            (refreshed before link/collide)
 //
-// Unused dimensions (numDimensions < 3) stay exactly 0 in pos and vel.
+// Unused dimensions (numDimensions < 3) stay exactly 0 in pos and vel. Kernels that read
+// other nodes' predicted positions (link, collide) get the snapshot, pos + vel refreshed
+// just before them, in group 1.
 
 export var PRELUDE = /* wgsl */`
 struct Sim {
@@ -23,7 +24,6 @@ struct Sim {
 @group(0) @binding(0) var<uniform> sim: Sim;
 @group(0) @binding(1) var<storage, read_write> pos: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> vel: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> snap: array<vec4<f32>>;
 
 fn pcg(v: u32) -> u32 {
   let s = v * 747796405u + 2891336453u;
@@ -54,6 +54,8 @@ fn coincident(i: u32, j: u32) -> vec3<f32> {
 
 // pos + vel -> snap
 export var SNAPSHOT = PRELUDE + /* wgsl */`
+@group(1) @binding(0) var<storage, read_write> snap: array<vec4<f32>>;
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;

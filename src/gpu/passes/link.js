@@ -20,6 +20,7 @@ struct Link { src: u32, dst: u32, distance: f32, strength: f32, bias: f32 }
 @group(1) @binding(0) var<storage, read> links: array<Link>;
 @group(1) @binding(1) var<storage, read> adjacency: array<u32>;   // link * 2 + (node is target)
 @group(1) @binding(2) var<storage, read> rowStart: array<u32>;    // n + 1 offsets into adjacency
+@group(1) @binding(3) var<storage, read> snap: array<vec4<f32>>;
 
 @compute @workgroup_size(${WORKGROUP})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -47,7 +48,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 export default {
   type: "link",
-  pipelines: {link: {code: code, entry: "main", spec: ["ro", "ro", "ro"]}},
+  pipelines: {link: {code: code, entry: "main", spec: ["ro", "ro", "ro", "ro"]}},
 
   create: function(engine) {
     var device = engine.device,
@@ -93,7 +94,7 @@ export default {
       buffers = [storage(device, packed), storage(device, adjacency), storage(device, rowStart)];
       bindGroup = device.createBindGroup({
         layout: engine.pipeline("link").getBindGroupLayout(1),
-        entries: buffers.map(function(buffer, binding) {
+        entries: buffers.concat([engine.snap]).map(function(buffer, binding) {
           return {binding: binding, resource: {buffer: buffer}};
         })
       });

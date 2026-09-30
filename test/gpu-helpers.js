@@ -56,17 +56,31 @@ export function fields(dims) {
   return ["x", "y", "z"].slice(0, dims).concat(["vx", "vy", "vz"].slice(0, dims));
 }
 
+// `outliers`: how many nodes may miss the tolerance (they must still be finite). The
+// Barnes-Hut tree needs a few: a theta test that f64 decides by less than f32 can resolve
+// (a relative margin of ~1e-7) can go the other way, and changes that node's force by up to
+// 41% of the cell's in 3D.
 export function assertNodesClose(actual, expected, dims, options) {
-  var rtol = options && options.rtol || 1e-4, atol = options && options.atol || 1e-4, worst = 0;
+  var rtol = options && options.rtol || 1e-4, atol = options && options.atol || 1e-4,
+      outliers = options && options.outliers || 0, worst = 0, missed = [];
   assert.strictEqual(actual.length, expected.length);
   actual.forEach(function(a, i) {
+    var miss = null;
     fields(dims).forEach(function(f) {
       var e = expected[i][f], tolerance = atol + rtol * Math.max(1, Math.abs(a[f]), Math.abs(e)), d = Math.abs(a[f] - e);
+      assert(isFinite(a[f]), "node " + i + "." + f + " is " + a[f]);
       worst = Math.max(worst, d / tolerance);
-      assert(d <= tolerance, "node " + i + "." + f + ": " + a[f] + " vs " + e + " (|diff| " + d + " > " + tolerance + ")");
+      if (!(d <= tolerance) && !miss) miss = "node " + i + "." + f + ": " + a[f] + " vs " + e + " (|diff| " + d + " > " + tolerance + ")";
     });
+    if (miss) missed.push(miss);
   });
+  assert(missed.length <= outliers, missed.length + " node(s) off (" + outliers + " allowed): " + missed.slice(0, 3).join("; "));
   return worst;
+}
+
+// Outliers allowed when comparing n nodes against the CPU's Barnes-Hut tree: 1 per 1000.
+export function treeOutliers(n) {
+  return Math.max(1, Math.ceil(n / 1000));
 }
 
 // Run the same forces for `ticks` on the CPU and the GPU from the same start.
@@ -76,7 +90,7 @@ export async function runBoth(device, options) {
       cpuNodes = (options.makeNodes || makeNodes)(options.n, dims),
       gpuNodes = (options.makeNodes || makeNodes)(options.n, dims),
       cpu = forceSimulation(cpuNodes, dims).stop(),
-      gpu = forceSimulationGPU(gpuNodes, dims, {device: device}).stop();
+      gpu = forceSimulationGPU(gpuNodes, dims, {device: device, split: options.split}).stop();
 
   options.makeForces().forEach(function(d) { cpu.force(d[0], d[1]); });
   options.makeForces().forEach(function(d) { gpu.force(d[0], d[1]); });

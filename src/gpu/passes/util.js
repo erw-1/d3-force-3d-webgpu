@@ -54,6 +54,20 @@ export function params(device, size) {
   };
 }
 
+// Small graphs give a GPU too few threads (one per node) to hide memory latency. Kernels
+// that loop over all nodes therefore let SPLIT threads share each node's loop and add
+// their partial sums; big graphs already have threads to spare and use SPLIT = 1.
+var TARGET_THREADS = 1 << 18, MAX_SPLIT = 16, TILE_SIZE = 128;
+export function splitFor(n, forced) {
+  var split = 1;
+  if (forced > 0) { // the caller's choice: a power of two, at most one node per workgroup
+    while (split * 2 <= Math.min(forced, TILE_SIZE)) split *= 2;
+    return split;
+  }
+  while (split < MAX_SPLIT && n * split < TARGET_THREADS) split *= 2;
+  return split;
+}
+
 export function ceilDiv(a, b) {
   return Math.max(1, Math.ceil(a / b));
 }

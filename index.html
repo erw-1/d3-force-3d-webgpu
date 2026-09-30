@@ -5,7 +5,7 @@
 <title>d3-force-3d-webgpu</title>
 <meta name="description" content="d3-force-3d, running on your GPU. Same forces, same API, WebGPU compute shaders.">
 <meta property="og:title" content="d3-force-3d-webgpu">
-<meta property="og:description" content="d3-force-3d, running on your GPU. 20,000 nodes in 3D: 5 ms per tick instead of 214.">
+<meta property="og:description" content="d3-force-3d, running on your GPU. 20,000 nodes in 3D: 0.24 ms per tick instead of 136. A million: 3.2 ms.">
 <meta property="og:image" content="https://raw.githubusercontent.com/erw-1/d3-force-3d-webgpu/master/img/graph3d-webgpu.jpg">
 <style>
   :root { color-scheme: dark; }
@@ -43,7 +43,7 @@
     <a class="button" href="https://www.npmjs.com/package/d3-force-3d-webgpu">npm</a>
   </div>
 
-  <p>20,000 nodes in 3D: <strong>5 ms per tick</strong> instead of 214. Every built-in force runs on the GPU, with an automatic CPU fallback.</p>
+  <p>20,000 nodes in 3D: <strong>0.24 ms per tick</strong> instead of 136. A million nodes: 3.2 ms. Every built-in force runs on the GPU, with an automatic CPU fallback.</p>
 
 <pre>import {forceSimulationGPU, forceManyBody, forceLink} from "https://cdn.jsdelivr.net/npm/d3-force-3d-webgpu/+esm";
 

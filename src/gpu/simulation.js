@@ -28,6 +28,8 @@ export default function(nodes, numDimensions, options) {
 
   // options.device    a GPUDevice to run on (default: requested from navigator.gpu)
   // options.gpu       a GPU object to request the device from (e.g. from Node's `webgpu` package)
+  // options.split    threads per node in the GPU's all-pairs kernels (a power of two; by
+  //                   default chosen from the number of nodes, more for small graphs)
   // options.readback  false: do not copy positions back into the nodes on every tick, for
   //                   renderers that draw straight from gpuBuffers(). Nodes then only
   //                   update when sync() or tickAsync() is called.
@@ -154,10 +156,13 @@ export default function(nodes, numDimensions, options) {
 
     initializing = true;
     return (options.device ? Promise.resolve(options.device) : requestDevice(gpu)).then(function(device) {
-      return prepare(device).then(function() { return device; });
+      // the forces set so far (the usual chained .force() calls have run by now)
+      var types = [];
+      forces.forEach(function(force) { if (typeof force.gpu === "function") types.push((force.gpu() || {}).type); });
+      return prepare(device, nodes.length, nDim, options.split, types).then(function() { return device; });
     }).then(function(device) {
       if (destroyed) return false;
-      engine = createEngine(device, gpuFail);
+      engine = createEngine(device, gpuFail, {split: options.split});
       engine.setSeed(random);
       reset();
       return usable;
