@@ -5,7 +5,8 @@ export var MAP_READ = 0x0001,
     COPY_SRC = 0x0004,
     COPY_DST = 0x0008,
     UNIFORM = 0x0040,
-    STORAGE = 0x0080;
+    STORAGE = 0x0080,
+    INDIRECT = 0x0100;
 
 export var COMPUTE = 0x4;
 

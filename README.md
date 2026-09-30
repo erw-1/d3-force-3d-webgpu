@@ -18,7 +18,7 @@ This is a fork of [vasturiano/d3-force-3d](https://github.com/vasturiano/d3-forc
 
 * **`forceSimulationGPU`**. Drop-in for `forceSimulation`. Same arguments, same methods.
 * **Every built-in force on the GPU.** Many-body, link, collide, center, radial, x, y, z. Accessors, `iterations` and pinning (`fx`/`fy`/`fz`) work too.
-* **Up to ~550× faster.** 20,000 nodes: 0.24 ms per tick instead of 136. A million nodes: 3.2 ms per tick.
+* **Up to ~740× faster.** 20,000 nodes: 0.18 ms per tick instead of 134. A million nodes: 2.6 ms per tick.
 * **Same layouts as the CPU.** Many-body builds d3-force-3d's own Barnes-Hut tree on the GPU, `theta` and all.
 * **Automatic CPU fallback.** No WebGPU, or a custom force? It runs on the CPU like before.
 * **Draw without readback.** `gpuBuffers()` gives you the position buffer. Render straight from it.
@@ -79,17 +79,17 @@ Using 3d-force-graph or force-graph? They create their own `forceSimulation`, so
 
 ## Speed
 
-Milliseconds per tick. 3D, `forceLink` + `forceManyBody` + `forceCenter`, 1.5 links per node. Brave on an RTX 4090, Ryzen 9 9950X3D for the CPU. Yours will differ: run the [benchmark](https://erw-1.github.io/d3-force-3d-webgpu/examples/benchmark.html).
+Milliseconds per tick, best of a few runs. 3D, `forceLink` + `forceManyBody` + `forceCenter`, 1.5 links per node. Brave on an RTX 4090, Ryzen 9 9950X3D for the CPU. Yours will differ: run the [benchmark](https://erw-1.github.io/d3-force-3d-webgpu/examples/benchmark.html).
 
 | nodes     | CPU     | GPU      | speed-up |
 |----------:|--------:|---------:|---------:|
-| 1,000     | 3.6 ms  | 0.089 ms | 41×      |
-| 5,000     | 26.9 ms | 0.12 ms  | 232×     |
-| 20,000    | 136 ms  | 0.24 ms  | 556×     |
-| 50,000    | -       | 0.34 ms  |          |
-| 100,000   | -       | 0.47 ms  |          |
-| 200,000   | -       | 0.88 ms  |          |
-| 1,000,000 | -       | 3.2 ms   |          |
+| 1,000     | 3.5 ms  | 0.067 ms | 52×      |
+| 5,000     | 26.4 ms | 0.10 ms  | 264×     |
+| 20,000    | 134 ms  | 0.18 ms  | 744×     |
+| 50,000    | -       | 0.27 ms  |          |
+| 100,000   | -       | 0.37 ms  |          |
+| 200,000   | -       | 0.71 ms  |          |
+| 1,000,000 | -       | 2.6 ms   |          |
 
 Both columns compute the same thing. Every tick the GPU builds d3-force-3d's Barnes-Hut tree: a radix sort of the nodes' Morton codes, a radix tree over them, then one walk down the tree per node. O(n log n), like the CPU. Collide finds its pairs with a grid past 8,192 nodes.
 
@@ -120,6 +120,7 @@ Everything in [upstream's API](#api-reference) still applies. On top of it:
   * `device`: a `GPUDevice` to run on (say, your renderer's).
   * `gpu`: a `GPU` to request one from (say, Node's [`webgpu`](https://www.npmjs.com/package/webgpu) package).
   * `readback`: `false` skips copying positions into the nodes on every tick.
+  * `cpuTicks`: how many of the timer's first ticks run on the CPU, with d3-force-3d's own code, while the GPU starts up. 120 up to 1,000 nodes, so small layouts move at once. `0`: the GPU from the first tick.
   * `split`: threads per node in the all-pairs kernels (many-body with `theta(0)`, collide below 8,192 nodes). A power of two, picked from the graph size. You rarely need it.
 * **`simulation.gpuReady()`**. Promise: `true` if the GPU is in use, `false` for the CPU.
 * **`simulation.isGPUEnabled()`**. Is it running on the GPU right now?

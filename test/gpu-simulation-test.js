@@ -1,4 +1,7 @@
+/* global WeakRef */
 import assert from "assert";
+import v8 from "v8";
+import vm from "vm";
 import {forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation, forceSimulationGPU, forceX, forceZ} from "../src/index.js";
 import {assertNodesClose, makeNodes, useDevice} from "./gpu-helpers.js";
 import {assertNodeEqual} from "./asserts.js";
@@ -67,8 +70,8 @@ describe("forceSimulationGPU", function() {
     assert.deepStrictEqual(fellBack, [], "a simulation fell back to the CPU: " + fellBack.join("; "));
   });
 
-  function make(nodes, dims) {
-    var sim = forceSimulationGPU(nodes, dims, {device: gpu.device});
+  function make(nodes, dims, options) {
+    var sim = forceSimulationGPU(nodes, dims, Object.assign({device: gpu.device}, options));
     sim.gpuReady().then(function(ok) { if (!ok && !expectCPU) fellBack.push("gpuReady() was false"); });
     return sim;
   }
@@ -114,7 +117,7 @@ describe("forceSimulationGPU", function() {
 
   it("emits tick events with up-to-date nodes, then end", async function() {
     var nodes = makeNodes(30, 2), ticks = 0, ends = 0, snapshots = [],
-        sim = make(nodes, 2).alphaDecay(0.3).force("charge", forceManyBody());
+        sim = make(nodes, 2, {cpuTicks: 0}).alphaDecay(0.3).force("charge", forceManyBody());
     sim.on("tick", function() { ++ticks; snapshots.push(nodes[0].x); });
     sim.on("end", function() { ++ends; });
     await delay(1500);
@@ -127,7 +130,7 @@ describe("forceSimulationGPU", function() {
 
   it("stop() and restart() control the timer", async function() {
     var nodes = makeNodes(30, 2), ticks = 0,
-        sim = make(nodes, 2).force("charge", forceManyBody()).on("tick", function() { ++ticks; });
+        sim = make(nodes, 2, {cpuTicks: 0}).force("charge", forceManyBody()).on("tick", function() { ++ticks; });
     await sim.gpuReady();
     await delay(100);
     sim.stop();
@@ -139,6 +142,69 @@ describe("forceSimulationGPU", function() {
     await delay(200);
     assert(ticks > stopped, "ticks resume");
     sim.destroy();
+  });
+
+  describe("the timer's first ticks run on the CPU (cpuTicks)", function() {
+    // A GPU tick leaves 32-bit values in the nodes; a CPU tick, 64-bit ones.
+    var state = function(nodes) { return nodes.map(function(n) { return [n.x, n.y, n.z, n.vx, n.vy, n.vz]; }); },
+        f32 = function(s) { return s.every(function(d) { return d.every(function(v) { return Math.fround(v) === v; }); }); },
+        links = function() { return Array.from({length: 59}, function(_, i) { return {source: i + 1, target: i >> 1}; }); },
+        forces = function(sim) { return sim.force("link", forceLink(links())).force("charge", forceManyBody()); };
+
+    // The nodes' states at the next `count` tick events; the timer is stopped after the last.
+    function record(sim, nodes, count) {
+      var states = [];
+      return new Promise(function(resolve) {
+        sim.on("tick", function() {
+          states.push(state(nodes));
+          if (states.length === count) sim.on("tick", null).stop(), resolve(states);
+        });
+      });
+    }
+
+    it("runs them exactly like forceSimulation, then goes on on the GPU", async function() {
+      var nodes = makeNodes(60, 3), cpuNodes = makeNodes(60, 3),
+          sim = forces(make(nodes, 3, {cpuTicks: 10})),
+          cpu = forces(forceSimulation(cpuNodes, 3).stop()),
+          states = await record(sim, nodes, 11);
+      cpu.tick(10);
+      assert.deepStrictEqual(states[9], state(cpuNodes), "ticks 1 to 10 are forceSimulation's, to the last bit");
+      assert(!f32(states[9]));
+      assert(f32(states[10]), "tick 11 ran on the GPU");
+      assert.strictEqual(sim.isGPUEnabled(), true);
+      sim.destroy();
+    });
+
+    it("starts over when the nodes are replaced", async function() {
+      var second = makeNodes(50, 3, 100, 7), cpuNodes = makeNodes(50, 3, 100, 7),
+          sim = make(makeNodes(20, 3), 3, {cpuTicks: 3}).force("charge", forceManyBody()),
+          cpu = forceSimulation(cpuNodes, 3).stop().force("charge", forceManyBody());
+      await record(sim, sim.nodes(), 5); // 3 on the CPU, 2 on the GPU
+      sim.nodes(second).alpha(1).restart();
+      var states = await record(sim, second, 4);
+      cpu.tick(3);
+      assert.deepStrictEqual(states[2], state(cpuNodes));
+      assert(f32(states[3]), "then the GPU again");
+      sim.destroy();
+    });
+
+    it("is off above 1,000 nodes", async function() {
+      var nodes = makeNodes(1001, 3), sim = make(nodes, 3).force("charge", forceManyBody()),
+          states = await record(sim, nodes, 1);
+      assert(f32(states[0]), "the first tick ran on the GPU");
+      sim.destroy();
+    });
+
+    it("leaves the rest to the GPU once tick() or tickAsync() is called", async function() {
+      var a = makeNodes(30, 3), b = makeNodes(30, 3),
+          simA = make(a, 3).force("charge", forceManyBody()), simB;
+      await simA.tickAsync(1);
+      assert((await record(simA, a, 3)).every(f32), "timer ticks after tickAsync()");
+      simB = make(b, 3).force("charge", forceManyBody());
+      simB.tick(); // before the GPU is ready: on the CPU, like forceSimulation
+      assert((await record(simB, b, 3)).every(f32), "timer ticks after tick()");
+      simA.destroy(), simB.destroy();
+    });
   });
 
   it("picks up force parameter changes made after the simulation started", async function() {
@@ -429,5 +495,18 @@ describe("forceSimulationGPU", function() {
     sim.destroy();
     await delay(60);
     assert.doesNotThrow(function() { sim.tick(); });
+  });
+
+  it("lets a destroyed simulation's nodes be collected while the device lives on", async function() {
+    v8.setFlagsFromString("--expose-gc");
+    var gc = vm.runInNewContext("gc"), ref;
+    await (async function() {
+      var nodes = makeNodes(100, 3), sim = make(nodes, 3).stop().force("charge", forceManyBody());
+      await sim.tickAsync(2);
+      sim.destroy();
+      ref = new WeakRef(nodes);
+    })();
+    for (var i = 0; i < 20 && ref.deref(); ++i) await delay(10), gc();
+    assert.strictEqual(ref.deref(), undefined, "still reachable");
   });
 });

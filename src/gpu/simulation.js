@@ -18,6 +18,13 @@ import createEngine, {prepare, unsupported} from "./engine.js";
 
 var MAX_DIMENSIONS = 3;
 
+// Up to CPU_TICKS_NODES nodes, the timer's first CPU_TICKS ticks run on the CPU (d3-force-3d's
+// own code, cpuTick below) while the GPU starts up, so the layout moves at once. A fixed
+// count rather than "until the GPU is ready": the tick where the GPU takes over shapes the
+// final layout, which must not depend on how long the kernels took to compile.
+var CPU_TICKS = 120,
+    CPU_TICKS_NODES = 1000;
+
 var initialRadius = 10,
     initialAngleRoll = Math.PI * (3 - Math.sqrt(5)), // Golden ratio angle
     initialAngleYaw = Math.PI * 20 / (9 + Math.sqrt(221)); // Markov irrational number
@@ -33,6 +40,9 @@ export default function(nodes, numDimensions, options) {
   // options.readback  false: do not copy positions back into the nodes on every tick, for
   //                   renderers that draw straight from gpuBuffers(). Nodes then only
   //                   update when sync() or tickAsync() is called.
+  // options.cpuTicks  how many of the timer's first ticks after the nodes are set run on the
+  //                   CPU (default: 120 up to 1,000 nodes with readback, else 0). tick() and
+  //                   tickAsync() skip the rest.
   var readback = options.readback !== false;
 
   var nDim = Math.min(MAX_DIMENSIONS, Math.max(1, Math.round(numDimensions))),
@@ -57,6 +67,8 @@ export default function(nodes, numDimensions, options) {
       flushing = null,      // readback loop started by tick()
       batch = false,        // tick() has already been called in this synchronous run
       handover = null,      // GPU -> CPU state transfer in progress
+      warm = 0,             // timer ticks still to run on the CPU before the GPU takes over
+      seeded = false,       // the shaders' jiggle seed has been drawn from `random`
       destroyed = false,
       warned = null;
 
@@ -127,6 +139,9 @@ export default function(nodes, numDimensions, options) {
 
   // Submit `iterations` steps to the GPU (without waiting for them).
   function advance(iterations) {
+    // Drawn at the first GPU step, not when the device is ready: CPU ticks may draw from
+    // `random` too, and which tick the device is ready at depends on timing.
+    if (!seeded) seeded = true, engine.setSeed(random);
     var alphas = new Array(iterations);
     for (var k = 0; k < iterations; ++k) {
       alpha += (alphaTarget - alpha) * alphaDecay;
@@ -163,7 +178,6 @@ export default function(nodes, numDimensions, options) {
     }).then(function(device) {
       if (destroyed) return false;
       engine = createEngine(device, gpuFail, {split: options.split});
-      engine.setSeed(random);
       reset();
       return usable;
     }).catch(function(error) {
@@ -178,8 +192,15 @@ export default function(nodes, numDimensions, options) {
   // --- simulation ----------------------------------------------------------------------
 
   function step() {
-    if (initializing || handover) return;
-    if (usable) return frame || gpuStep();
+    if (handover) return;
+    if (warm > 0) {
+      --warm;
+      if (engine) engine.markStale(); // the GPU takes over from the nodes as the CPU leaves them
+    } else if (initializing) {
+      return;
+    } else if (usable) {
+      return frame || gpuStep();
+    }
 
     cpuTick();
     event.call("tick", simulation);
@@ -198,6 +219,7 @@ export default function(nodes, numDimensions, options) {
 
   function tick(iterations) {
     if (iterations === undefined) iterations = 1;
+    warm = 0;
     if (!usable) return cpuTick(iterations);
 
     // A tick() per frame must not pile work up when the GPU cannot keep pace, so it is
@@ -248,6 +270,12 @@ export default function(nodes, numDimensions, options) {
     return force;
   }
 
+  // The timer's first ticks on this node set run on the CPU (see CPU_TICKS).
+  function arm() {
+    warm = options.cpuTicks != null ? Math.max(0, Math.floor(options.cpuTicks)) || 0
+        : readback && nodes.length <= CPU_TICKS_NODES ? CPU_TICKS : 0;
+  }
+
   function reset() {
     if (!engine) return;
     if (oversized = !engine.fits(nodes.length)) {
@@ -261,6 +289,7 @@ export default function(nodes, numDimensions, options) {
   }
 
   initializeNodes();
+  arm();
   ready = init();
 
   return simulation = {
@@ -281,7 +310,7 @@ export default function(nodes, numDimensions, options) {
     },
 
     nodes: function(_) {
-      return arguments.length ? (nodes = _, initializeNodes(), forces.forEach(initializeForce), reset(), simulation) : nodes;
+      return arguments.length ? (nodes = _, initializeNodes(), arm(), forces.forEach(initializeForce), reset(), simulation) : nodes;
     },
 
     alpha: function(_) {
@@ -305,7 +334,7 @@ export default function(nodes, numDimensions, options) {
     },
 
     randomSource: function(_) {
-      return arguments.length ? (random = _, forces.forEach(initializeForce), engine && engine.setSeed(random), simulation) : random;
+      return arguments.length ? (random = _, forces.forEach(initializeForce), engine && (seeded = true, engine.setSeed(random)), simulation) : random;
     },
 
     force: function(name, _) {
@@ -357,6 +386,7 @@ export default function(nodes, numDimensions, options) {
     // wait for the GPU).
     tickAsync: function(iterations) {
       if (iterations === undefined) iterations = 1;
+      warm = 0;
       return ready.then(function() { return handover; }).then(function() {
         if (!usable) return cpuTick(iterations);
         advance(iterations);

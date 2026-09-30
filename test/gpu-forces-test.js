@@ -219,6 +219,23 @@ describe("WebGPU forces match the CPU forces", function() {
       });
     });
 
+    // Nodes that share their cells down to half the tree's depth sort by the rest of their
+    // codes: in runs of up to 32 nodes, or with a sort of their own past that. A clump of
+    // side 2 and an outlier: at 120, the clump spans thousands of those cells; at 2000, a
+    // few (2D) or one (3D).
+    [[2, 120, "runs of a few nodes"], [3, 120, "runs of a few nodes"], [2, 2000, "long runs"], [3, 2000, "one run"]].forEach(function(c) {
+      it(c[0] + "D, 9000 nodes sharing the tree's top levels: " + c[2], async function() {
+        var r = await runBoth(gpu.device, {dims: c[0], n: 9000, ticks: 1, makeNodes: function(n, d) {
+          var nodes = makeNodes(n, d, 2);
+          nodes[0].x = c[1];
+          return nodes;
+        }, makeForces: function() {
+          return [["charge", forceManyBody()]];
+        }});
+        assertNodesClose(r.gpuNodes, r.cpuNodes, c[0], {rtol: 1e-3, outliers: treeOutliers(9000)});
+      });
+    });
+
     it("over 20 ticks", async function() {
       var r = await runBoth(gpu.device, {dims: 3, n: 1000, ticks: 20, makeForces: function() {
         return [["charge", forceManyBody()], ["center", forceCenter()]];

@@ -17,6 +17,15 @@ A browser can't wait for the GPU synchronously. So `simulation.tick()` doesn't l
 
 Edits you make while it runs are picked up: pin with `fx`/`fy`/`fz` (dragging), or set `x`/`y`/`z`. Velocities are copied back to `vx`/`vy`/`vz`, but the GPU owns them. Writing them does nothing.
 
+## Small graphs start on the CPU
+
+The GPU needs a moment to start (0.6 s on the test machine): getting the device, compiling the kernels. Up to 1,000 nodes, the timer's first 120 ticks run on the CPU meanwhile, with d3-force-3d's own code, so the layout moves at once. Then the GPU takes over.
+
+* **Always 120 ticks**, not "until the GPU is ready". Where the GPU takes over shapes the final layout, so it must not depend on how fast the kernels compiled. The layout comes out the same on every run.
+* **Close to d3-force-3d's layout.** The first ticks decide the layout's shape. A 1,000-node random graph with links 30 long settles 0.3 (3D) to 0.6 (2D) units from where d3-force-3d puts its nodes (RMS). Starting on the GPU: 36 to 85 units.
+* **Counted from `nodes()`**, like a new layout. `tick()` and `tickAsync()` skip the rest: they go to the GPU.
+* **Your choice** with the `cpuTicks` option. `0` gives the GPU from the first tick, the same layout as `tickAsync()`.
+
 ## Many-body: the same tree as the CPU
 
 The CPU force approximates far-away nodes with a Barnes-Hut tree (d3-octree in 3D, d3-quadtree in 2D, d3-binarytree in 1D). The GPU builds that same tree every tick, and walks it the same way.

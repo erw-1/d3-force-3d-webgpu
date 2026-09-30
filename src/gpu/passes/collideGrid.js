@@ -7,14 +7,19 @@ import {ceilDiv} from "./util.js";
 // found with a uniform grid. Cells are twice the largest radius wide, so two nodes that
 // overlap are in the same or neighbouring cells (3^dims of them). Every step:
 //
-//   keys    each node's cell, hashed into a table of (a power of two >= 2n) slots
-//   sort    radix sort of (hash, node) pairs: a cell's nodes become a run
+//   keys    each node's cell, as a slot of a table of (a power of two >= 2n) slots
+//   sort    radix sort of (slot, node) pairs: a cell's nodes become a run
 //   starts  where each run starts, and the sorted nodes' (position, radius)
 //   query   every node looks through the runs of its neighbouring cells
 //
-// A hash shared by two cells only costs distance tests, except that the two runs are then
-// one: a node skips a neighbouring cell whose hash it has already looked through. The
-// start of a run is not cleared between steps; it is checked against the sorted hashes.
+// A block of cells takes consecutive slots, its cells in Morton order, from a hashed
+// offset: the sort keeps nearby cells together, so neighbouring threads look through
+// nearby runs, and cells of different blocks share a slot only by chance (a hash of each
+// cell would scatter them; a Morton code cut to the table's bits would put a lattice with
+// the right spacing all in one slot). A shared slot only costs distance tests, except that
+// the two runs are then one: a node skips a neighbouring cell whose slot it has already
+// looked through. The start of a run is not cleared between steps; it is checked against
+// the sorted slots.
 
 var WG = 64;
 
@@ -40,8 +45,40 @@ fn cellOf(p: vec3<f32>) -> vec3<i32> {
   return select(vec3<i32>(0), vec3<i32>(floor(p * g.inv)), activeDims());
 }
 
+fn spread3(v: u32) -> u32 { // 10 bits -> every third bit
+  var x = v & 0x3ffu;
+  x = (x | (x << 16u)) & 0x030000ffu;
+  x = (x | (x << 8u)) & 0x0300f00fu;
+  x = (x | (x << 4u)) & 0x030c30c3u;
+  x = (x | (x << 2u)) & 0x09249249u;
+  return x;
+}
+fn spread2(v: u32) -> u32 { // 16 bits -> every other bit
+  var x = v & 0xffffu;
+  x = (x | (x << 8u)) & 0x00ff00ffu;
+  x = (x | (x << 4u)) & 0x0f0f0f0fu;
+  x = (x | (x << 2u)) & 0x33333333u;
+  x = (x | (x << 1u)) & 0x55555555u;
+  return x;
+}
+
+// The cell's slot. A block of 8^3 cells (16^2 in 2D, 256 in 1D) takes consecutive slots,
+// its cells in Morton order, from an offset hashed from the block's coordinates (pcg mixes
+// the high bits in: without it, blocks whose coordinates are all multiples of 2^k would
+// only reach every 2^k-th offset).
 fn hash(c: vec3<i32>) -> u32 {
-  return ((u32(c.x) * 73856093u) ^ (u32(c.y) * 19349663u) ^ (u32(c.z) * 83492791u)) & g.mask;
+  let q = bitcast<vec3<u32>>(c);
+  var block = q >> vec3<u32>(8u, 0u, 0u);
+  var m = q.x & 255u;
+  if (sim.nDim == 2u) {
+    block = q >> vec3<u32>(4u, 4u, 0u);
+    m = (spread2(q.y & 15u) << 1u) | spread2(q.x & 15u);
+  }
+  if (sim.nDim == 3u) {
+    block = q >> vec3<u32>(3u);
+    m = (spread3(q.z & 7u) << 2u) | (spread3(q.y & 7u) << 1u) | spread3(q.x & 7u);
+  }
+  return (pcg((block.x * 73856093u) ^ (block.y * 19349663u) ^ (block.z * 83492791u)) + m) & g.mask;
 }
 
 @compute @workgroup_size(${WG})

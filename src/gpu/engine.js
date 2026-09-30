@@ -47,6 +47,17 @@ export function unsupported(forces) {
   return found;
 }
 
+// Calls onLost if the device is lost while the engine is alive. The promise outlives the
+// engine, so its callback must not close over the engine's state (nodes and their copies):
+// it only holds this small object, which destroy() empties.
+function watchLoss(device, onLost) {
+  var watch = {onLost: onLost};
+  device.lost.then(function(info) {
+    if (watch.onLost) watch.onLost(info);
+  });
+  return watch;
+}
+
 function num(v) {
   return (v = +v) === v ? v : 0; // undefined / NaN -> 0
 }
@@ -87,9 +98,7 @@ export default function(device, onLost, options) {
       pinned = new Uint8Array(0),     // fx/fy/fz mask
       pinnedAt = new Float64Array(0); // fx, fy, fz
 
-  device.lost.then(function(info) {
-    if (alive && onLost) onLost(info);
-  });
+  var loss = watchLoss(device, onLost);
 
   function release() {
     plan.forEach(function(entry) { entry.pass.destroy(); });
@@ -412,7 +421,9 @@ export default function(device, onLost, options) {
 
     destroy: function() {
       alive = false;
+      loss.onLost = null;
       release();
+      nodes = [], shadow = pinnedAt = new Float64Array(0), pinned = new Uint8Array(0);
     }
   };
 }

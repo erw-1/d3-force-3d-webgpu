@@ -4,7 +4,9 @@ import {params, ceilDiv} from "./util.js";
 
 // Centering force: shift every node so that the mean position sits at (x, y, z).
 // The mean is a two-level parallel reduction (workgroup partial sums, then one workgroup
-// summing the partials into partial[0]), followed by a per-node shift.
+// summing the partials into partial[0]), followed by a per-node shift. Up to 256 partial
+// sums (65536 nodes), every workgroup of the shift sums them itself, the same way, which
+// spares a dispatch.
 
 var code = PRELUDE + /* wgsl */`
 struct P { center: vec3<f32>, strength: f32 }
@@ -42,13 +44,30 @@ fn combine(@builtin(local_invocation_index) li: u32) {
   if (li == 0u) { partial[0] = sh[0] / f32(sim.n); }
 }
 
+fn shiftBy(i: u32, mean: vec3<f32>) {
+  let shift = select(vec3<f32>(0.0), (mean - p.center) * p.strength, activeDims());
+  let q = pos[i];
+  pos[i] = vec4<f32>(q.xyz - shift, q.w);
+}
+
 @compute @workgroup_size(256)
 fn apply(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= sim.n) { return; }
-  let shift = select(vec3<f32>(0.0), (partial[0].xyz - p.center) * p.strength, activeDims());
-  let q = pos[i];
-  pos[i] = vec4<f32>(q.xyz - shift, q.w);
+  shiftBy(i, partial[0].xyz);
+}
+
+@compute @workgroup_size(256)
+fn combineApply(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let groups = (sim.n + 255u) / 256u;
+  var v = vec4<f32>(0.0);
+  if (li < groups) { v += partial[li]; }
+  sh[li] = v;
+  workgroupBarrier();
+  reduceShared(li);
+  let mean = sh[0] / f32(sim.n);
+  if (gid.x >= sim.n) { return; }
+  shiftBy(gid.x, mean.xyz);
 }
 `;
 
@@ -59,7 +78,8 @@ export default {
   pipelines: {
     centerReduce: {code: code, entry: "reduce", spec: spec},
     centerCombine: {code: code, entry: "combine", spec: spec},
-    centerApply: {code: code, entry: "apply", spec: spec}
+    centerApply: {code: code, entry: "apply", spec: spec},
+    centerCombineApply: {code: code, entry: "combineApply", spec: spec}
   },
 
   create: function(engine) {
@@ -84,9 +104,13 @@ export default {
         pass.setBindGroup(1, bindGroup);
         pass.setPipeline(engine.pipeline("centerReduce"));
         pass.dispatchWorkgroups(groups);
-        pass.setPipeline(engine.pipeline("centerCombine"));
-        pass.dispatchWorkgroups(1);
-        pass.setPipeline(engine.pipeline("centerApply"));
+        if (groups <= 256) {
+          pass.setPipeline(engine.pipeline("centerCombineApply"));
+        } else {
+          pass.setPipeline(engine.pipeline("centerCombine"));
+          pass.dispatchWorkgroups(1);
+          pass.setPipeline(engine.pipeline("centerApply"));
+        }
         pass.dispatchWorkgroups(groups);
       },
 
