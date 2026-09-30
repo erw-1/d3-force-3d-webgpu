@@ -16,7 +16,7 @@
 </script>
 <style>
   html, body { margin: 0; height: 100%; background: #0b0d12; color: #cfd6e4; font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
-  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
   canvas:active { cursor: grabbing; }
   #hud { position: fixed; top: 12px; left: 12px; padding: 10px 12px; background: rgba(15, 18, 26, .82); border: 1px solid #262c3a; border-radius: 8px; max-width: 21rem; backdrop-filter: blur(6px); }
   #hud h1 { font-size: 13px; margin: 0 0 6px; color: #fff; }
@@ -26,12 +26,14 @@
   #hud button { cursor: pointer; }
   #stats { margin-top: 6px; color: #8f9bb3; font-variant-numeric: tabular-nums; white-space: pre; }
   #note { margin-top: 6px; color: #d9a441; display: none; }
+  #hint { margin-top: 8px; font-size: 11.5px; color: #6f7a92; }
   #error { position: fixed; inset: 0; display: none; place-items: center; text-align: center; padding: 2rem; pointer-events: none; }
   #error p { max-width: 26rem; margin: 0; padding: 1rem 1.25rem; background: rgba(15, 18, 26, .9); border: 1px solid #6b4a1a; border-radius: 8px; color: #f0c674; }
-  #gpu { display: flex; align-items: center; gap: 7px; margin: 0 0 8px; color: #8f9bb3; }
-  #gpu::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: #6b7488; }
-  #gpu.ok::before { background: #3ecf8e; box-shadow: 0 0 6px #3ecf8e88; }
-  #gpu.bad::before { background: #f0605d; }
+  #gpu { margin: 0 0 8px; color: #8f9bb3; }
+  #surprise { display: block; width: 100%; margin: 8px 0 2px; padding: 6px 8px !important; font-weight: 600; color: #fff !important; background: #2a4fc4 !important; border-color: #3b6ff0 !important; }
+  #surprise:hover:not(:disabled) { background: #3459d6 !important; }
+  #surprise:disabled { opacity: .6; cursor: progress !important; }
+  #maneuver { min-height: 1.4em; text-align: center; color: #9fb0cf; }
   #mode { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 0 0 6px; }
   #mode label { display: block; margin: 0; cursor: pointer; }
   #mode input { position: absolute; opacity: 0; pointer-events: none; }
@@ -46,7 +48,7 @@
 <canvas id="canvas"></canvas>
 <div id="hud">
   <h1>d3-force-3d · WebGPU</h1>
-  <div id="gpu">checking WebGPU…</div>
+  <div id="gpu"></div>
   <div id="mode" role="radiogroup" aria-label="Physics engine">
     <label><input type="radio" name="mode" value="cpu" autocomplete="off"><span>CPU<small>d3-force-3d</small></span></label>
     <label><input type="radio" name="mode" value="gpu" checked autocomplete="off"><span>GPU<small>d3-force-3d-webgpu</small></span></label>
@@ -57,16 +59,18 @@
       <option>50000</option><option>100000</option><option>200000</option>
     </select>
   </label>
-  <label>Charge strength <input id="charge" autocomplete="off" type="range" min="1" max="200" value="30"></label>
-  <label>Link distance <input id="distance" autocomplete="off" type="range" min="1" max="100" value="30"></label>
-  <label><span>Simulation <button id="reheat">Reheat</button></span> <span><input id="rotate" type="checkbox" checked autocomplete="off"> auto-rotate</span></label>
+  <label><span><input id="rotate" type="checkbox" checked autocomplete="off"> auto-rotate</span></label>
+  <button id="surprise" title="Shake the graph in a random way">Surprise me</button>
+  <div id="maneuver"></div>
   <div id="stats"></div>
   <div id="note"></div>
+  <div id="hint">Drag a node to pull it · drag the background to orbit · scroll to zoom · double-click to reset the view</div>
 </div>
 <div id="error"><p></p></div>
 
 <script type="module">
 import {forceSimulation, forceSimulationGPU, forceManyBody, forceLink, forceCenter} from "../src/index.js";
+import {mountGPUStatus} from "./gpu-status.js";
 
 var $ = function(id) { return document.getElementById(id); },
     params = new URLSearchParams(location.search),
@@ -84,26 +88,6 @@ function mode() { return document.querySelector("#mode input:checked").value; }
 function fail(message) {
   $("error").style.display = "grid";
   $("error").firstChild.textContent = message;
-}
-
-// What this browser and machine offer, shown at the top of the panel.
-async function detectWebGPU() {
-  var box = $("gpu");
-  function report(kind, text) { box.className = kind, box.textContent = text; }
-
-  if (!navigator.gpu) {
-    report("bad", window.isSecureContext ? "WebGPU: not supported by this browser" : "WebGPU: needs https or localhost");
-    return null;
-  }
-  try {
-    var adapter = await navigator.gpu.requestAdapter({powerPreference: "high-performance"});
-    if (!adapter) return report("bad", "WebGPU: supported, but no GPU adapter found"), null;
-    var info = adapter.info || {}, name = [info.vendor, info.architecture].filter(Boolean).join(" ") || info.description || "GPU adapter";
-    report("ok", "WebGPU: " + name);
-    return adapter;
-  } catch (error) {
-    return report("bad", "WebGPU: " + (error && error.message || "could not start")), null;
-  }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -193,8 +177,24 @@ function normalize(v) { var l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] 
 
 // ---------------------------------------------------------------------------------------
 
-var camera = {yaw: 0.6, pitch: 0.35, distance: 400, target: 400},
+// The camera orbits the origin. `distance` eases towards `target`; while `auto` is set, the
+// target follows `fit`, the distance that frames the layout. Zooming by hand clears `auto`.
+var FOV = 0.9,
+    camera = {yaw: 0.6, pitch: 0.35, distance: 400, target: 400, fit: 400, auto: true},
     device, format, context, depth, pipelines, frameBuffer, current = null, drag = null;
+
+// Where the camera is, and the matrix that projects the scene: shared by drawing and picking.
+function view() {
+  var aspect = canvas.width / canvas.height,
+      distance = camera.distance * Math.max(1, 1 / aspect), // keep the width in view on portrait screens
+      eye = [distance * Math.cos(camera.pitch) * Math.sin(camera.yaw), distance * Math.sin(camera.pitch), distance * Math.cos(camera.pitch) * Math.cos(camera.yaw)],
+      forward = normalize([-eye[0], -eye[1], -eye[2]]),
+      right = normalize(cross(forward, [0, 1, 0]));
+  return {
+    eye: eye, forward: forward, right: right, up: cross(right, forward), aspect: aspect, tan: Math.tan(FOV / 2),
+    viewProj: multiply(perspective(FOV, aspect, distance * 0.02, distance * 20), lookAt(eye, [0, 0, 0], [0, 1, 0]))
+  };
+}
 
 // Communities of ~120 nodes, densely linked inside and sparsely between, so that clusters
 // show up in the layout.
@@ -236,28 +236,34 @@ async function start() {
   teardown();
 
   var n = +$("count").value, graph = makeGraph(n), gpu = mode() === "gpu",
-      charge = forceManyBody().strength(-$("charge").value),
-      link = forceLink(graph.links).distance(+$("distance").value),
       sim = (gpu ? forceSimulationGPU(graph.nodes, 3, {device: device, readback: false}) : forceSimulation(graph.nodes, 3))
-          .force("link", link).force("charge", charge).force("center", forceCenter()),
-      state = {sim: sim, charge: charge, link: link, graph: graph, ticks: 0, buffers: [], wantGPU: gpu,
+          .force("link", forceLink(graph.links)).force("charge", forceManyBody()).force("center", forceCenter()),
+      state = {sim: sim, graph: graph, ticks: 0, buffers: [], wantGPU: gpu, busy: false, positions: null, velocities: null,
                startedAt: performance.now(), settledAt: null, dirty: true, posBuffer: null};
 
   current = state;
+  lastTicks = 0, lastStats = 0; // the ticks/s readout restarts with the new simulation
   sim.on("tick", function() { ++state.ticks, state.dirty = true; });
   sim.on("end", function() { state.settledAt = performance.now(); });
 
   var positions = null;
   if (gpu) {
+    // Nothing is drawn until the GPU is ready, and the kernels compile the first time: say so.
+    $("stats").textContent = "Starting the GPU…\ncompiling the shaders (first time only)";
     await sim.gpuReady();
     if (current !== state) return; // switched again while waiting
-    if (sim.isGPUEnabled()) positions = sim.gpuBuffers().positions;
+    if (sim.isGPUEnabled()) {
+      var buffers = sim.gpuBuffers();
+      state.startupMs = performance.now() - state.startedAt, state.startedAt = performance.now(); // "settled in" then counts the physics only
+      positions = buffers.positions, state.velocities = buffers.velocities;
+    }
   }
   if (!positions) { // CPU physics, so upload positions from the nodes
     positions = state.posBuffer = device.createBuffer({size: 16 * n, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
     state.staging = new Float32Array(4 * n);
     state.buffers.push(positions);
   }
+  state.positions = positions; // what the renderer reads
 
   var linkBuffer = storage(graph.pairs), degreeBuffer = storage(graph.degree);
   state.buffers.push(linkBuffer, degreeBuffer);
@@ -267,7 +273,8 @@ async function start() {
     {binding: 0, resource: {buffer: frameBuffer}}, {binding: 1, resource: {buffer: positions}}, {binding: 2, resource: {buffer: linkBuffer}}]});
   state.nodeCount = n, state.linkCount = graph.links.length;
 
-  camera.target = camera.distance = 12 * Math.cbrt(n) + 100;
+  camera.auto = true;
+  camera.fit = camera.target = camera.distance = 12 * Math.cbrt(n) + 100;
   fitLoop(state);
 }
 
@@ -284,13 +291,21 @@ function reheat(state, alpha) {
   state.sim.alpha(alpha).restart();
 }
 
+// The distance that frames the layout. The camera goes there unless the user has zoomed.
+function setFit(distance) {
+  camera.fit = distance;
+  if (camera.auto) camera.target = distance;
+}
+
 // Once a second, read the layout back (the one place it is needed on the CPU) to size the view.
 async function fitLoop(state) {
   while (current === state) {
     if (state.sim.isGPUEnabled && state.sim.isGPUEnabled()) await state.sim.sync();
-    var nodes = state.graph.nodes, s = 0;
-    for (var i = 0; i < nodes.length; ++i) s += nodes[i].x * nodes[i].x + nodes[i].y * nodes[i].y + nodes[i].z * nodes[i].z;
-    if (s > 0) camera.target = 3.2 * Math.sqrt(s / nodes.length) + 40;
+    if (!state.busy) { // a maneuver frames the view itself
+      var nodes = state.graph.nodes, s = 0;
+      for (var i = 0; i < nodes.length; ++i) s += nodes[i].x * nodes[i].x + nodes[i].y * nodes[i].y + nodes[i].z * nodes[i].z;
+      if (s > 0) setFit(3.2 * Math.sqrt(s / nodes.length) + 40);
+    }
     await new Promise(function(resolve) { setTimeout(resolve, 1000); });
   }
 }
@@ -313,14 +328,10 @@ function draw(now) {
   if (dt > 0) fps = fps * 0.9 + 100 / dt;
 
   if ($("rotate").checked && !drag) camera.yaw += dt * 0.00012;
-  camera.distance += (camera.target - camera.distance) * 0.06;
+  if (!(drag && drag.node)) camera.distance += (camera.target - camera.distance) * 0.06; // the view holds still while a node is held
 
-  var aspect = canvas.width / canvas.height,
-      distance = camera.distance * Math.max(1, 1 / aspect), // keep the width in view on portrait screens
-      eye = [distance * Math.cos(camera.pitch) * Math.sin(camera.yaw), distance * Math.sin(camera.pitch), distance * Math.cos(camera.pitch) * Math.cos(camera.yaw)],
-      viewProj = multiply(perspective(0.9, aspect, distance * 0.02, distance * 20), lookAt(eye, [0, 0, 0], [0, 1, 0])),
-      frame = new Float32Array(24);
-  frame.set(viewProj, 0);
+  var frame = new Float32Array(24);
+  frame.set(view().viewProj, 0);
   frame[16] = canvas.width, frame[17] = canvas.height, frame[18] = 1.6 * (window.devicePixelRatio || 1);
   device.queue.writeBuffer(frameBuffer, 0, frame);
 
@@ -346,8 +357,10 @@ function draw(now) {
       var onGPU = !!current.sim.isGPUEnabled && current.sim.isGPUEnabled(), settled = current.settledAt !== null;
       $("stats").textContent = current.nodeCount.toLocaleString() + " nodes · " + current.linkCount.toLocaleString() + " links\n"
           + "physics on " + (onGPU ? "GPU" : "CPU") + " · render " + fps.toFixed(0) + " fps\n"
-          + (settled ? "settled in " + ((current.settledAt - current.startedAt) / 1000).toFixed(1) + " s (" + current.ticks + " ticks)"
-                     : tickRate.toFixed(0) + " ticks/s · alpha " + current.sim.alpha().toFixed(3));
+          + (current.busy ? "physics paused for the maneuver"
+             : settled ? "settled in " + ((current.settledAt - current.startedAt) / 1000).toFixed(1) + " s (" + current.ticks + " ticks)"
+             : tickRate.toFixed(0) + " ticks/s · alpha " + current.sim.alpha().toFixed(3))
+          + (current.startupMs ? "\nGPU started in " + (current.startupMs / 1000).toFixed(1) + " s" : "");
       $("note").style.display = current.wantGPU && !onGPU ? "block" : "none";
       $("note").textContent = "The GPU simulation could not start, so this ran on the CPU.";
     }
@@ -364,10 +377,363 @@ function limitCounts() {
   if ($("count").selectedOptions[0].disabled) $("count").value = "20000";
 }
 
+// ---------------------------------------------------------------------------------------
+// Picking and dragging nodes. The nodes follow the GPU only when asked (sync()), so a pick
+// first reads the layout back, then projects every node to the screen and takes the one
+// nearest the camera under the pointer. A held node is pinned (fx/fy/fz) to the pointer,
+// and the simulation stays warm meanwhile, like d3's own drag behaviour.
+
+function usesGPU(state) { return !!state.sim.isGPUEnabled && state.sim.isGPUEnabled(); }
+
+async function pick(clientX, clientY) {
+  var state = current;
+  if (!state || !state.nodeGroup || state.busy) return null;
+  if (usesGPU(state)) await state.sim.sync();
+  if (current !== state || state.busy) return null;
+
+  var v = view(), rect = canvas.getBoundingClientRect(), nodes = state.graph.nodes, degree = state.graph.degree,
+      kx = rect.width / (2 * v.tan * v.aspect), ky = rect.height / (2 * v.tan),
+      best = null, nearest = Infinity;
+  for (var i = 0, n = nodes.length; i < n; ++i) {
+    var node = nodes[i], dx = node.x - v.eye[0], dy = node.y - v.eye[1], dz = node.z - v.eye[2],
+        depth = dx * v.forward[0] + dy * v.forward[1] + dz * v.forward[2];
+    if (depth <= 0 || depth >= nearest) continue;
+    var sx = rect.left + rect.width / 2 + (dx * v.right[0] + dy * v.right[1] + dz * v.right[2]) / depth * kx,
+        sy = rect.top + rect.height / 2 - (dx * v.up[0] + dy * v.up[1] + dz * v.up[2]) / depth * ky,
+        reach = 1.6 * (1 + 0.45 * Math.log2(1 + degree[i])) + 4; // the drawn radius (see nodeVS), plus some slack
+    if ((sx - clientX) * (sx - clientX) + (sy - clientY) * (sy - clientY) <= reach * reach) best = node, nearest = depth;
+  }
+  return best;
+}
+
+// The direction of the ray through a point of the screen (its component along the view is 1).
+function rayAt(v, clientX, clientY) {
+  var rect = canvas.getBoundingClientRect(),
+      x = (2 * (clientX - rect.left) / rect.width - 1) * v.tan * v.aspect,
+      y = (1 - 2 * (clientY - rect.top) / rect.height) * v.tan;
+  return [0, 1, 2].map(function(k) { return v.forward[k] + v.right[k] * x + v.up[k] * y; });
+}
+
+function grabNode(grab, node, downX, downY) {
+  var v = view(), ray = rayAt(v, downX, downY),
+      depth = (node.x - v.eye[0]) * v.forward[0] + (node.y - v.eye[1]) * v.forward[1] + (node.z - v.eye[2]) * v.forward[2];
+  grab.node = node, grab.depth = depth;
+  grab.offset = [node.x - (v.eye[0] + ray[0] * depth), node.y - (v.eye[1] + ray[1] * depth), node.z - (v.eye[2] + ray[2] * depth)];
+  current.startedAt = performance.now(), current.settledAt = null;
+  current.sim.alphaTarget(0.3).restart();
+  moveNode(grab);
+}
+
+// The node goes where the pointer is, at the depth where it was grabbed.
+function moveNode(grab) {
+  var v = view(), ray = rayAt(v, grab.x, grab.y);
+  grab.node.fx = v.eye[0] + ray[0] * grab.depth + grab.offset[0];
+  grab.node.fy = v.eye[1] + ray[1] * grab.depth + grab.offset[1];
+  grab.node.fz = v.eye[2] + ray[2] * grab.depth + grab.offset[2];
+}
+
+function pointerDown(e) {
+  if (!e.isPrimary || (e.pointerType === "mouse" && e.button !== 0)) return;
+  canvas.setPointerCapture(e.pointerId);
+  var grab = drag = {x: e.clientX, y: e.clientY, node: null, pending: true}, downX = e.clientX, downY = e.clientY;
+  pick(downX, downY).then(function(node) {
+    if (drag !== grab) return; // let go already
+    grab.pending = false;
+    if (node) grabNode(grab, node, downX, downY);
+  });
+}
+
+function pointerMove(e) {
+  if (!drag || !e.isPrimary) return;
+  var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.x = e.clientX, drag.y = e.clientY;
+  if (drag.pending) return;
+  if (drag.node) return moveNode(drag);
+  camera.yaw -= dx * 0.006;
+  camera.pitch = Math.max(-1.5, Math.min(1.5, camera.pitch + dy * 0.006));
+}
+
+function pointerUp(e) {
+  if (!drag || !e.isPrimary) return;
+  var grab = drag;
+  drag = null;
+  if (grab.node) { // let go: the layout settles again
+    grab.node.fx = grab.node.fy = grab.node.fz = null;
+    if (current) current.sim.alphaTarget(0);
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Surprise me: a random maneuver. The physics pauses while every node follows a path for a
+// second or two (the positions are written straight into the buffer the renderer reads),
+// then the forces take over again and pull the graph back into shape.
+
+var TAU = 2 * Math.PI, PHI = (1 + Math.sqrt(5)) / 2;
+
+function smooth(t) { return t * t * (3 - 2 * t); }
+
+function randomUnit() {
+  var z = 2 * Math.random() - 1, a = TAU * Math.random(), r = Math.sqrt(1 - z * z);
+  return [r * Math.cos(a), r * Math.sin(a), z];
+}
+
+// A uniformly random rotation, as a row-major 3x3 matrix (from a random unit quaternion).
+function randomRotation() {
+  var u = Math.random(), v = TAU * Math.random(), w = TAU * Math.random(),
+      a = Math.sqrt(1 - u) * Math.sin(v), b = Math.sqrt(1 - u) * Math.cos(v), c = Math.sqrt(u) * Math.sin(w), d = Math.sqrt(u) * Math.cos(w);
+  return [1 - 2 * (b * b + c * c), 2 * (a * b - c * d), 2 * (a * c + b * d),
+          2 * (a * b + c * d), 1 - 2 * (a * a + c * c), 2 * (b * c - a * d),
+          2 * (a * c - b * d), 2 * (b * c + a * d), 1 - 2 * (a * a + b * b)];
+}
+
+var turned = [0, 0, 0];
+function turn(m, x, y, z) { // m · (x, y, z)
+  turned[0] = m[0] * x + m[1] * y + m[2] * z, turned[1] = m[3] * x + m[4] * y + m[5] * z, turned[2] = m[6] * x + m[7] * y + m[8] * z;
+  return turned;
+}
+function turnBack(m, x, y, z) { // mᵀ · (x, y, z)
+  turned[0] = m[0] * x + m[3] * y + m[6] * z, turned[1] = m[1] * x + m[4] * y + m[7] * z, turned[2] = m[2] * x + m[5] * y + m[8] * z;
+  return turned;
+}
+
+function spread(n, lo, hi) {
+  var a = new Float32Array(n);
+  for (var i = 0; i < n; ++i) a[i] = lo + (hi - lo) * Math.random();
+  return a;
+}
+
+// All sign changes of v (and of its cyclic shifts, if asked), as unit vectors.
+function orbit(v, cyclic) {
+  var out = [];
+  (cyclic ? [v, [v[2], v[0], v[1]], [v[1], v[2], v[0]]] : [v]).forEach(function(s) {
+    for (var m = 0; m < 8; ++m) {
+      var w = [m & 1 ? -s[0] : s[0], m & 2 ? -s[1] : s[1], m & 4 ? -s[2] : s[2]];
+      if (!out.some(function(o) { return o[0] === w[0] && o[1] === w[1] && o[2] === w[2]; })) out.push(w);
+    }
+  });
+  return out.map(normalize);
+}
+
+// Convex solids by their face normals. The surface is at distance inradius / max(normal · direction)
+// along a direction; ratio is circumradius / inradius, size the circumradius in units of the layout's
+// baseline radius (so that its nodes end up about as far out as before).
+var SOLIDS = {
+  Dodecahedron: {ratio: 1.2584, size: 1.15, normals: orbit([0, 1, PHI], true)},
+  Icosahedron: {ratio: 1.2584, size: 1.15, normals: orbit([1, 1, 1]).concat(orbit([0, 1 / PHI, PHI], true))},
+  Cube: {ratio: Math.sqrt(3), size: 1.15, normals: orbit([1, 0, 0], true)},
+  Octahedron: {ratio: Math.sqrt(3), size: 1.15, normals: orbit([1, 1, 1])},
+  Tetrahedron: {ratio: 3, size: 1.3, normals: [[1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]].map(normalize)},
+  Sphere: {ratio: 1, size: 1, normals: null}
+};
+
+// Every node moves in a straight line to its place in `target` (a Float32Array like c.P).
+function moveTo(c, target) {
+  return function(t, P) {
+    var e = smooth(t);
+    for (var i = 0, len = 4 * c.n; i < len; ++i) P[i] = c.P0[i] + (target[i] - c.P0[i]) * e;
+  };
+}
+
+// The layout's nodes, each pushed out along its direction from the centre onto a solid.
+function solidTarget(c, solid) {
+  var m = randomRotation(), d = solid.size * c.R0 / solid.ratio, T = new Float32Array(4 * c.n),
+      N = solid.normals && new Float32Array([].concat.apply([], solid.normals.map(function(v) { return Array.prototype.slice.call(turnBack(m, v[0], v[1], v[2])); })));
+  for (var i = 0; i < c.n; ++i) {
+    var x = c.P0[4 * i] - c.cx, y = c.P0[4 * i + 1] - c.cy, z = c.P0[4 * i + 2] - c.cz, l = Math.hypot(x, y, z), r = d;
+    if (l < 1e-9) x = 0, y = 0, z = 1, l = 1;
+    x /= l, y /= l, z /= l;
+    if (N) {
+      var facing = 0;
+      for (var k = 0; k < N.length; k += 3) facing = Math.max(facing, N[k] * x + N[k + 1] * y + N[k + 2] * z);
+      r = d / facing;
+    }
+    r *= 0.97 + 0.06 * Math.random(); // a little thickness
+    T[4 * i] = c.cx + x * r, T[4 * i + 1] = c.cy + y * r, T[4 * i + 2] = c.cz + z * r;
+  }
+  return T;
+}
+
+function solidManeuver(name) {
+  return function(c) {
+    return {name: name, ms: 1400, hold: 1400, alpha: 1, frame: moveTo(c, solidTarget(c, SOLIDS[name]))};
+  };
+}
+
+// key: for the automated checks; make(c) -> {name, ms, hold, alpha, frame(t, P)}, where c holds
+// the start positions c.P0, their centre, their RMS distance from it c.R, and the baseline radius
+// c.R0 (the layout's size at the first press: a maneuver that sets a size sets it from that, so
+// that repeated presses do not compound). frame fills the positions at time t (0 to 1).
+// alpha: how hot the simulation restarts.
+var MANEUVERS = [
+  {key: "bang", make: function(c) {
+    var k = 2.5 + Math.random(), speed = spread(c.n, 0.5, 1.5);
+    return {name: "Big bang", ms: 1600, hold: 0, alpha: 1, frame: function(t, P) {
+      var e = smooth(t), P0 = c.P0;
+      for (var i = 0, x, y, z, s; i < c.n; ++i) { // every node is thrown outwards, by k baseline radii at most
+        x = P0[4 * i] - c.cx, y = P0[4 * i + 1] - c.cy, z = P0[4 * i + 2] - c.cz;
+        s = 1 + k * c.R0 * speed[i] * e / (Math.sqrt(x * x + y * y + z * z) + 1e-9);
+        P[4 * i] = c.cx + x * s, P[4 * i + 1] = c.cy + y * s, P[4 * i + 2] = c.cz + z * s;
+      }
+    }};
+  }},
+
+  {key: "hole", make: function(c) {
+    var size = spread(c.n, 0.08, 0.14); // how much of its distance from the centre each node keeps
+    return {name: "Black hole", ms: 1500, hold: 300, alpha: 1, frame: function(t, P) {
+      var e = smooth(t), P0 = c.P0;
+      for (var i = 0, s; i < c.n; ++i) {
+        s = 1 + (size[i] - 1) * e;
+        P[4 * i] = c.cx + (P0[4 * i] - c.cx) * s, P[4 * i + 1] = c.cy + (P0[4 * i + 1] - c.cy) * s, P[4 * i + 2] = c.cz + (P0[4 * i + 2] - c.cz) * s;
+      }
+    }};
+  }},
+
+  {key: "whirlwind", make: function(c) {
+    var a = randomUnit(), turns = 5 + 4 * Math.random(), twist = 1.5 + 1.5 * Math.random(), core = 0.25 * c.R * c.R;
+    return {name: "Whirlwind", ms: 2400, hold: 0, alpha: 1, frame: function(t, P) {
+      var e = smooth(t), P0 = c.P0;
+      for (var i = 0; i < c.n; ++i) {
+        var x = P0[4 * i] - c.cx, y = P0[4 * i + 1] - c.cy, z = P0[4 * i + 2] - c.cz,
+            h = x * a[0] + y * a[1] + z * a[2],                      // along the axis
+            across = (x * x + y * y + z * z - h * h) / core,           // (distance from the axis / core radius)²
+            phi = e * (turns / (1 + across) + twist * h / c.R),        // fast in the core, slower outside, twisted along the axis
+            cs = Math.cos(phi), sn = Math.sin(phi), hh = h * (1 - cs);
+        // Rodrigues' rotation of (x, y, z) about the axis a
+        P[4 * i] = c.cx + x * cs + (a[1] * z - a[2] * y) * sn + a[0] * hh;
+        P[4 * i + 1] = c.cy + y * cs + (a[2] * x - a[0] * z) * sn + a[1] * hh;
+        P[4 * i + 2] = c.cz + z * cs + (a[0] * y - a[1] * x) * sn + a[2] * hh;
+      }
+    }};
+  }},
+
+  {key: "dodecahedron", make: solidManeuver("Dodecahedron")},
+
+  {key: "solid", make: function(c, name) {
+    var names = ["Icosahedron", "Cube", "Octahedron", "Tetrahedron", "Sphere"];
+    return solidManeuver(name || names[Math.floor(Math.random() * names.length)])(c);
+  }},
+
+  {key: "torus", make: function(c) {
+    var m = randomRotation(), ring = 0.9 * c.R0, tube = 0.35 * c.R0, T = new Float32Array(4 * c.n);
+    for (var i = 0; i < c.n; ++i) {
+      var q = turn(m, c.P0[4 * i] - c.cx, c.P0[4 * i + 1] - c.cy, c.P0[4 * i + 2] - c.cz),
+          theta = Math.atan2(q[1], q[0]), psi = Math.atan2(q[2], Math.hypot(q[0], q[1]) - ring), // around the ring, and around the tube
+          r = ring + tube * Math.cos(psi) * (0.97 + 0.06 * Math.random()),
+          p = turnBack(m, r * Math.cos(theta), r * Math.sin(theta), tube * Math.sin(psi));
+      T[4 * i] = c.cx + p[0], T[4 * i + 1] = c.cy + p[1], T[4 * i + 2] = c.cz + p[2];
+    }
+    return {name: "Torus", ms: 1400, hold: 1400, alpha: 1, frame: moveTo(c, T)};
+  }},
+
+  {key: "pancake", make: function(c) {
+    var a = randomUnit(), T = new Float32Array(4 * c.n);
+    for (var i = 0; i < c.n; ++i) {
+      var x = c.P0[4 * i] - c.cx, y = c.P0[4 * i + 1] - c.cy, z = c.P0[4 * i + 2] - c.cz, h = 0.97 * (x * a[0] + y * a[1] + z * a[2]);
+      T[4 * i] = c.cx + x - h * a[0], T[4 * i + 1] = c.cy + y - h * a[1], T[4 * i + 2] = c.cz + z - h * a[2];
+    }
+    return {name: "Pancake", ms: 1300, hold: 1000, alpha: 1, frame: moveTo(c, T)};
+  }},
+
+  {key: "shuffle", make: function(c) {
+    var order = new Uint32Array(c.n), T = new Float32Array(4 * c.n), i, j, t;
+    for (i = 0; i < c.n; ++i) order[i] = i;
+    for (i = c.n - 1; i > 0; --i) j = Math.floor(Math.random() * (i + 1)), t = order[i], order[i] = order[j], order[j] = t;
+    for (i = 0; i < c.n; ++i) T[4 * i] = c.P0[4 * order[i]], T[4 * i + 1] = c.P0[4 * order[i] + 1], T[4 * i + 2] = c.P0[4 * order[i] + 2];
+    return {name: "Shuffle", ms: 1500, hold: 200, alpha: 1, frame: moveTo(c, T)};
+  }},
+
+  {key: "shockwave", make: function(c) {
+    var amp = 0.5 * c.R, width = 0.3 * c.R, reach = 3 * c.R;
+    return {name: "Shockwave", ms: 2400, hold: 0, alpha: 0.3, frame: function(t, P) {
+      var front = -3 * width + t * (reach + 6 * width), P0 = c.P0; // a ring that sweeps outwards through the layout
+      for (var i = 0; i < c.n; ++i) {
+        var x = P0[4 * i] - c.cx, y = P0[4 * i + 1] - c.cy, z = P0[4 * i + 2] - c.cz, l = Math.sqrt(x * x + y * y + z * z) || 1e-9,
+            w = (l - front) / width, s = 1 + amp * Math.exp(-w * w) / l;
+        P[4 * i] = c.cx + x * s, P[4 * i + 1] = c.cy + y * s, P[4 * i + 2] = c.cz + z * s;
+      }
+    }};
+  }}
+];
+
+// Every maneuver once, in random order, and never the same one twice in a row.
+var deck = [], lastManeuver = null;
+function nextManeuver() {
+  if (!deck.length) {
+    deck = MANEUVERS.slice();
+    for (var i = deck.length - 1, j, t; i > 0; --i) j = Math.floor(Math.random() * (i + 1)), t = deck[i], deck[i] = deck[j], deck[j] = t;
+    if (deck[deck.length - 1] === lastManeuver) t = deck[0], deck[0] = deck[deck.length - 1], deck[deck.length - 1] = t;
+  }
+  return lastManeuver = deck.pop();
+}
+
+// Call draw(t) every frame, t going from 0 to 1 over `ms`; stops early if the demo moves on to another graph.
+function animate(state, ms, draw) {
+  return new Promise(function(resolve) {
+    var t0 = performance.now();
+    (function step(now) {
+      var t = Math.min(1, (now - t0) / ms);
+      if (current !== state) return resolve();
+      draw(t);
+      if (t < 1) requestAnimationFrame(step); else resolve();
+    })(t0);
+  });
+}
+
+// The nodes' positions as the GPU stores them, their centre, their RMS distance from it, and
+// the layout's baseline radius: its size at the first press on this graph.
+function snapshot(state) {
+  var nodes = state.graph.nodes, n = nodes.length, P0 = new Float32Array(4 * n), cx = 0, cy = 0, cz = 0, r = 0, i, node;
+  for (i = 0; i < n; ++i) {
+    node = nodes[i], P0[4 * i] = node.x, P0[4 * i + 1] = node.y, P0[4 * i + 2] = node.z;
+    cx += node.x, cy += node.y, cz += node.z;
+  }
+  cx /= n, cy /= n, cz /= n;
+  for (i = 0; i < n; ++i) r += Math.pow(P0[4 * i] - cx, 2) + Math.pow(P0[4 * i + 1] - cy, 2) + Math.pow(P0[4 * i + 2] - cz, 2);
+  r = Math.sqrt(r / n) || 1;
+  return {n: n, P0: P0, P: new Float32Array(P0), cx: cx, cy: cy, cz: cz, R: r, R0: state.baseR || (state.baseR = r)};
+}
+
+async function surprise(key, arg) {
+  var state = current;
+  if (!state || !state.nodeGroup || state.busy || drag) return;
+  state.busy = true;
+  $("surprise").disabled = true;
+  try {
+    state.sim.stop();
+    if (usesGPU(state)) await state.sim.sync();
+    if (current !== state) return;
+
+    var c = snapshot(state), maneuver = (key ? MANEUVERS.filter(function(m) { return m.key === key; })[0] : nextManeuver()).make(c, arg), frames = 0;
+    $("maneuver").textContent = maneuver.name;
+    state.settledAt = null; // the physics is paused: no "settled in" until it is running again
+    await animate(state, maneuver.ms, function(t) {
+      maneuver.frame(t, c.P);
+      device.queue.writeBuffer(state.positions, 0, c.P);
+      if (frames++ % 6 === 0) { // keep it in view
+        for (var i = 0, s = 0; i < c.P.length; i += 4) s += c.P[i] * c.P[i] + c.P[i + 1] * c.P[i + 1] + c.P[i + 2] * c.P[i + 2];
+        setFit(3.2 * Math.sqrt(s / c.n) + 40);
+      }
+    });
+    if (maneuver.hold && current === state) await new Promise(function(resolve) { setTimeout(resolve, maneuver.hold); });
+    if (current !== state) return;
+
+    // Let go, at rest. (On the GPU the nodes' own copy is re-uploaded with the next step; the
+    // velocities live on the GPU only, so clear them there.)
+    var nodes = state.graph.nodes;
+    for (var i = 0; i < c.n; ++i) nodes[i].x = c.P[4 * i], nodes[i].y = c.P[4 * i + 1], nodes[i].z = c.P[4 * i + 2], nodes[i].vx = nodes[i].vy = nodes[i].vz = 0;
+    if (state.velocities) device.queue.writeBuffer(state.velocities, 0, new Float32Array(4 * c.n));
+    state.dirty = true;
+    reheat(state, maneuver.alpha);
+  } finally {
+    state.busy = false;
+    $("surprise").disabled = false;
+  }
+}
+
 (async function() {
-  var adapter = await detectWebGPU();
+  var adapter = await mountGPUStatus($("gpu")); // what this browser and machine offer, at the top of the panel
   if (!adapter) {
-    Array.prototype.forEach.call(document.querySelectorAll("#hud input, #hud select, #hud button"), function(el) { el.disabled = true; });
+    Array.prototype.forEach.call(document.querySelectorAll("#hud input, #hud select, #surprise"), function(el) { el.disabled = true; });
     return fail("This demo draws with WebGPU, so it needs it too. Try a recent Chrome or Edge.");
   }
   device = await adapter.requestDevice();
@@ -396,19 +762,20 @@ function limitCounts() {
     });
   });
   $("count").addEventListener("change", start);
-  $("charge").addEventListener("input", function() { if (current) current.charge.strength(-$("charge").value), reheat(current, Math.max(current.sim.alpha(), 0.3)); });
-  $("distance").addEventListener("input", function() { if (current) current.link.distance(+$("distance").value), reheat(current, Math.max(current.sim.alpha(), 0.3)); });
-  $("reheat").addEventListener("click", function() { if (current) reheat(current, 1); });
+  $("surprise").addEventListener("click", function() { surprise(); });
 
-  canvas.addEventListener("pointerdown", function(e) { drag = {x: e.clientX, y: e.clientY}; canvas.setPointerCapture(e.pointerId); });
-  canvas.addEventListener("pointermove", function(e) {
-    if (!drag) return;
-    camera.yaw -= (e.clientX - drag.x) * 0.006;
-    camera.pitch = Math.max(-1.5, Math.min(1.5, camera.pitch + (e.clientY - drag.y) * 0.006));
-    drag.x = e.clientX, drag.y = e.clientY;
-  });
-  canvas.addEventListener("pointerup", function() { drag = null; });
-  canvas.addEventListener("wheel", function(e) { e.preventDefault(); camera.target *= Math.exp(e.deltaY * 0.001); camera.distance = camera.target; }, {passive: false});
+  canvas.addEventListener("pointerdown", pointerDown);
+  canvas.addEventListener("pointermove", pointerMove);
+  canvas.addEventListener("pointerup", pointerUp);
+  canvas.addEventListener("pointercancel", pointerUp);
+  canvas.addEventListener("dblclick", function() { camera.auto = true, camera.target = camera.fit; });
+  canvas.addEventListener("wheel", function(e) {
+    e.preventDefault();
+    camera.auto = false; // the view stays where the user put it (double-click to frame the layout again)
+    camera.target = Math.min(1e6, Math.max(3, camera.target * Math.exp(e.deltaY * (e.deltaMode === 1 ? 33 : 1) * 0.001)));
+  }, {passive: false});
+
+  window.__demo = {get current() { return current; }, get drag() { return drag; }, camera: camera, view: view, pick: pick, surprise: surprise}; // for the automated checks
 
   requestAnimationFrame(draw);
   start();

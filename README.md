@@ -97,11 +97,13 @@ Both columns compute the same thing. Every tick the GPU builds d3-force-3d's Bar
 
 ## Try it
 
-* **[Live demo](https://erw-1.github.io/d3-force-3d-webgpu/examples/graph3d.html)**. 3D graph, up to 200k nodes, rendered from the simulation's own buffers. Flip between CPU (d3-force-3d) and GPU physics to see the difference. It also tells you which GPU it found.
-* **[Benchmark](https://erw-1.github.io/d3-force-3d-webgpu/examples/benchmark.html)**. CPU vs GPU on your machine.
+* **[Live demo](https://erw-1.github.io/d3-force-3d-webgpu/examples/graph3d.html)**. 3D graph, up to 200k nodes, rendered from the simulation's own buffers. Drag nodes, zoom, flip between CPU (d3-force-3d) and GPU physics, or hit *Surprise me* for a random shake-up: big bang, whirlwind, dodecahedron… It tells you which GPU it found.
+* **[Benchmark](https://erw-1.github.io/d3-force-3d-webgpu/examples/benchmark.html)**. CPU vs GPU on your machine, from 1,000 to 500,000 nodes. The CPU column takes a while at the top end.
 * Locally: `npm install`, `npm run examples`, open <http://localhost:8080/examples/graph3d.html>.
 
 You need a browser with WebGPU (recent Chrome, Edge, Safari or Firefox; support varies by platform). Without it, the demos say so.
+
+**Laptop with two GPUs?** On Windows, Chrome and other Chromium browsers use the integrated GPU whatever `powerPreference` says, and it is many times slower. To get the dedicated one, enable `chrome://flags/#force-high-performance-gpu` and restart, or set the browser to "High performance" in Windows Settings › System › Display › Graphics. The demos show which GPU they found, with a "wrong GPU?" button that explains this.
 
 ## Good to know
 

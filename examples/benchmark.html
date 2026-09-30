@@ -26,14 +26,20 @@
   th, td { text-align: right; padding: .3rem .6rem; border-bottom: 1px solid #ddd; }
   th:first-child, td:first-child { text-align: left; }
   td.win { font-weight: 600; }
+  td.wait { color: #bbb; }
+  td .dot { display: inline-block; width: .55em; height: .55em; border-radius: 50%; background: #888; animation: pulse 1.3s ease-in-out infinite; }
+  /* opacity and transform only: they keep animating while the page is busy running the CPU column */
+  @keyframes pulse { 0%, 100% { opacity: .15; transform: scale(.75); } 50% { opacity: .85; transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) { td .dot { animation: none; opacity: .5; } }
+  #env { margin-top: .3rem; }
   #log { color: #a30; white-space: pre-wrap; }
 </style>
 
 <h1>d3-force-3d: CPU vs WebGPU</h1>
-<div class="muted" id="env">detecting WebGPU…</div>
+<div class="muted" id="env"></div>
 
 <form id="form">
-  <label>Node counts <input id="sizes" value="1000, 5000, 20000" size="24"></label>
+  <label>Node counts <input id="sizes" value="1000, 5000, 20000, 50000, 100000, 500000" size="40"></label>
   <label>Dimensions
     <select id="dims"><option>1</option><option>2</option><option selected>3</option></select>
   </label>
@@ -45,7 +51,7 @@
       <option value="link">link + center (no charge)</option>
     </select>
   </label>
-  <label>CPU up to n = <input id="cpuMax" value="20000" size="8"></label>
+  <label>CPU up to n = <input id="cpuMax" value="500000" size="8"></label>
   <button id="run">Run</button>
 </form>
 
@@ -56,7 +62,8 @@
 <div id="log"></div>
 
 <script type="module">
-import {forceSimulation, forceSimulationGPU, forceManyBody, forceLink, forceCenter, forceCollide, isWebGPUAvailable} from "../src/index.js";
+import {forceSimulation, forceSimulationGPU, forceManyBody, forceLink, forceCenter, forceCollide} from "../src/index.js";
+import {mountGPUStatus} from "./gpu-status.js";
 
 var $ = function(id) { return document.getElementById(id); },
     params = new URLSearchParams(location.search);
@@ -65,6 +72,15 @@ for (var [key, value] of params) if ($(key) && key !== "run") $(key).value = val
 
 function log(text) { $("log").textContent += text + "\n"; }
 function frame() { return new Promise(function(resolve) { setTimeout(resolve, 0); }); }
+
+// Let the browser draw what has changed before a long run keeps the page busy. (A hidden tab draws
+// no frames, hence the timeout.)
+function paint() {
+  return new Promise(function(resolve) {
+    var timer = setTimeout(resolve, 100);
+    requestAnimationFrame(function() { setTimeout(function() { clearTimeout(timer), resolve(); }, 0); });
+  });
+}
 
 // Deterministic random tree plus extra random links.
 function makeGraph(n, dims) {
@@ -84,12 +100,20 @@ function setup(sim, graph, kind) {
   return sim;
 }
 
+// A CPU tick runs on the page's main thread. Only the ticks are timed; between slow ones the page
+// gets a turn, so that it can draw and answer the user (a tick takes seconds at 500,000 nodes).
 async function timeCPU(graph, dims, kind, budget) {
-  var sim = setup(forceSimulation(graph.nodes, dims).stop(), graph, kind), ticks = 0, t0 = performance.now();
+  var sim = setup(forceSimulation(graph.nodes, dims).stop(), graph, kind), ticks = 0, spent = 0, minTicks = graph.nodes.length >= 200000 ? 2 : 3, t0, yielded;
   sim.tick(1); // includes any lazy setup
-  t0 = performance.now();
-  while (ticks < 300 && (performance.now() - t0 < budget || ticks < 3)) sim.tick(1), ++ticks;
-  return {ms: (performance.now() - t0) / ticks, ticks: ticks};
+  await frame();
+  yielded = performance.now();
+  while (ticks < 300 && (spent < budget || ticks < minTicks)) {
+    t0 = performance.now();
+    sim.tick(1);
+    spent += performance.now() - t0, ++ticks;
+    if (performance.now() - yielded > 50) await frame(), yielded = performance.now();
+  }
+  return {ms: spent / ticks, ticks: ticks};
 }
 
 async function timeGPU(graph, dims, kind, budget) {
@@ -107,15 +131,23 @@ async function timeGPU(graph, dims, kind, budget) {
   }
 }
 
-function addRow(cells) {
-  var tr = document.createElement("tr");
-  cells.forEach(function(c) {
-    var td = document.createElement("td");
-    td.textContent = c.text === undefined ? c : c.text;
-    if (c.win) td.className = "win";
-    tr.appendChild(td);
-  });
+// A row of the table is added as soon as its size starts, and filled in as the numbers come:
+// the cell being measured pulses, the ones still to come are dimmed.
+function addRow(n) {
+  var tr = document.createElement("tr"), cells = [];
+  for (var i = 0; i < 4; ++i) cells.push(tr.appendChild(document.createElement("td")));
+  cells[0].textContent = n + " / " + (n - 1 + Math.ceil(n / 2)); // the links of makeGraph
   $("results").tBodies[0].appendChild(tr);
+  return cells;
+}
+
+function setCell(td, value) {
+  td.className = "";
+  td.textContent = "";
+  if (value === "busy") td.appendChild(document.createElement("span")).className = "dot";
+  else if (value === "wait") td.className = "wait", td.textContent = "·";
+  else if (value && value.text !== undefined) td.textContent = value.text, td.className = value.win ? "win" : "";
+  else td.textContent = value;
 }
 
 var results = window.__results = [];
@@ -131,7 +163,9 @@ async function run() {
       sizes = $("sizes").value.split(/[\s,]+/).map(Number).filter(Boolean);
 
   for (var n of sizes) {
-    var row = {n: n, dims: dims, kind: kind}, graph;
+    var row = {n: n, dims: dims, kind: kind}, graph, cells = addRow(n);
+    setCell(cells[1], n <= cpuMax ? "wait" : "-"), setCell(cells[2], "busy"), setCell(cells[3], n <= cpuMax ? "wait" : "-");
+    await paint();
     try {
       graph = makeGraph(n, dims);
       row.gpu = await timeGPU(graph, dims, kind, 1500);
@@ -139,18 +173,17 @@ async function run() {
     } catch (error) {
       log("GPU run failed for n = " + n + ": " + error);
     }
+    setCell(cells[2], row.gpu ? row.gpu.ms.toFixed(2) : "-");
     if (n <= cpuMax) {
-      await frame();
+      setCell(cells[1], "busy");
+      await paint();
       graph = makeGraph(n, dims);
       row.cpu = await timeCPU(graph, dims, kind, 1500);
     }
     results.push(row);
-    addRow([
-      n + " / " + (row.links || Math.round(n * 1.5)),
-      row.cpu ? row.cpu.ms.toFixed(2) : "-",
-      row.gpu ? row.gpu.ms.toFixed(2) : "-",
-      row.cpu && row.gpu ? {text: (row.cpu.ms / row.gpu.ms).toFixed(1) + "×", win: row.cpu.ms > row.gpu.ms} : "-"
-    ]);
+    if (row.links) cells[0].textContent = n + " / " + row.links;
+    setCell(cells[1], row.cpu ? row.cpu.ms.toFixed(2) : "-");
+    setCell(cells[3], row.cpu && row.gpu ? {text: (row.cpu.ms / row.gpu.ms).toFixed(1) + "×", win: row.cpu.ms > row.gpu.ms} : "-");
     await frame();
   }
   $("run").disabled = false;
@@ -160,14 +193,7 @@ async function run() {
 $("form").addEventListener("submit", function(event) { event.preventDefault(); run(); });
 
 (async function() {
-  var text = "WebGPU: ";
-  if (!isWebGPUAvailable()) text += "not available in this browser — the GPU column will fail.";
-  else {
-    var adapter = await navigator.gpu.requestAdapter();
-    var info = adapter && adapter.info || {};
-    text += adapter ? [info.vendor, info.architecture, info.description].filter(Boolean).join(" · ") || "adapter found" : "no adapter";
-  }
-  $("env").textContent = text;
+  await mountGPUStatus($("env")); // which GPU this will measure (the GPU column fails without WebGPU)
   if (params.get("auto")) run();
 })();
 </script>
